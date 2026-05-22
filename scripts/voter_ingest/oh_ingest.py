@@ -166,19 +166,91 @@ BROWSER_HEADERS = {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/zip,application/octet-stream,*/*;q=0.8",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "application/zip,application/octet-stream,*/*;q=0.8"
+    ),
     "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www6.ohiosos.gov/ords/f?p=VOTERFTP:HOME",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-User": "?1",
+    "Sec-Fetch-Dest": "document",
 }
+
+OH_HOME_URL = "https://www6.ohiosos.gov/ords/f?p=VOTERFTP:HOME"
+
+_OH_SESSION: requests.Session | None = None
+
+
+def _get_oh_session() -> requests.Session:
+    """Return a requests.Session warmed up against the OH SoS APEX portal.
+
+    Oracle APEX (the platform behind www6.ohiosos.gov) refuses any request
+    that doesn't carry a valid ORA_WWV_* session cookie, returning 403 for
+    direct hits on f?p=VOTERFTP:DOWNLOAD URLs. We have to GET the public
+    HOME page first so APEX issues us those cookies, then reuse the session.
+    """
+    global _OH_SESSION
+    if _OH_SESSION is not None:
+        return _OH_SESSION
+
+    s = requests.Session()
+    s.headers.update(BROWSER_HEADERS)
+    log.info("warming up OH SoS session via %s", OH_HOME_URL)
+    try:
+        r = s.get(OH_HOME_URL, timeout=60, allow_redirects=True)
+        log.info("OH session warm-up: %s (cookies: %s)", r.status_code, ",".join(s.cookies.keys()) or "none")
+    except requests.RequestException as exc:
+        log.warning("OH session warm-up failed: %s (continuing anyway)", exc)
+    _OH_SESSION = s
+    return s
 
 
 def fetch_county(county: str) -> bytes:
     """Download a single county voter file (zip or csv) from the OH SoS portal."""
     url = f"{OH_BASE_URL}{county}"
     log.info("downloading %s", url)
-    resp = requests.get(url, timeout=180, stream=True, headers=BROWSER_HEADERS, allow_redirects=True)
-    resp.raise_for_status()
-    return resp.content
+    session = _get_oh_session()
+
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            resp = session.get(
+                url,
+                timeout=180,
+                allow_redirects=True,
+                headers={"Referer": OH_HOME_URL},
+            )
+        except requests.RequestException as exc:
+            last_exc = exc
+            log.warning("[%s] attempt %d network error: %s", county, attempt + 1, exc)
+            time.sleep(2 ** attempt)
+            continue
+
+        if resp.status_code == 403:
+            # Session may have expired or never validated — re-warm and retry.
+            log.warning("[%s] attempt %d -> 403; re-warming session", county, attempt + 1)
+            global _OH_SESSION
+            _OH_SESSION = None
+            session = _get_oh_session()
+            time.sleep(1 + attempt)
+            last_exc = requests.HTTPError(f"403 Forbidden for {url}")
+            continue
+
+        if resp.status_code >= 500 or resp.status_code == 429:
+            last_exc = requests.HTTPError(f"{resp.status_code} for {url}")
+            log.warning("[%s] attempt %d -> %s; retrying", county, attempt + 1, resp.status_code)
+            time.sleep(2 ** attempt)
+            continue
+
+        resp.raise_for_status()
+        return resp.content
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"unable to download {county}")
 
 
 def iter_csv_from_zip(payload: bytes) -> Iterator[dict[str, str]]:
