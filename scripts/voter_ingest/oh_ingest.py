@@ -12,6 +12,12 @@ Environment:
   OH_COUNTIES                  Optional comma-separated county filter.
                                Defaults to all 88 Ohio counties.
   OH_BASE_URL                  Override for the SoS download host.
+  OH_VOTER_FILE_BASE_URL       Optional mirror base URL. When set, county zips
+                               are fetched as `{base}/{COUNTY}.zip` instead of
+                               from the Ohio SoS portal. Use this to point at
+                               a Supabase Storage bucket (or any HTTPS host)
+                               that mirrors the SoS zips, bypassing the SoS
+                               anti-bot 403 on GitHub Actions IPs.
   DRY_RUN                      "1" to skip writes.
 
 Schema reference: ios/AICampaignConsultant/Services/VoterDataSchema.sql
@@ -49,6 +55,10 @@ OH_BASE_URL = os.environ.get(
     "OH_BASE_URL",
     "https://www6.ohiosos.gov/ords/f?p=VOTERFTP:DOWNLOAD::FILE:NO:RP:P1_TYPE,P1_NAME:CTY,",
 )
+
+# When set, county files are fetched from this mirror (e.g. Supabase Storage)
+# instead of the Ohio SoS portal. Expected layout: `{base}/{COUNTY}.zip`.
+OH_MIRROR_BASE_URL = os.environ.get("OH_VOTER_FILE_BASE_URL", "").rstrip("/")
 
 OH_ALL_COUNTIES = [
     "ADAMS","ALLEN","ASHLAND","ASHTABULA","ATHENS","AUGLAIZE","BELMONT","BROWN",
@@ -209,7 +219,14 @@ def _get_oh_session() -> requests.Session:
 
 
 def fetch_county(county: str) -> bytes:
-    """Download a single county voter file (zip or csv) from the OH SoS portal."""
+    """Download a single county voter file (zip or csv).
+
+    Prefers the OH_VOTER_FILE_BASE_URL mirror when configured; otherwise hits
+    the Ohio SoS portal directly (which 403s GitHub Actions IPs).
+    """
+    if OH_MIRROR_BASE_URL:
+        return _fetch_from_mirror(county)
+
     url = f"{OH_BASE_URL}{county}"
     log.info("downloading %s", url)
     session = _get_oh_session()
@@ -251,6 +268,46 @@ def fetch_county(county: str) -> bytes:
     if last_exc:
         raise last_exc
     raise RuntimeError(f"unable to download {county}")
+
+
+def _fetch_from_mirror(county: str) -> bytes:
+    """Pull a county zip from the configured mirror (e.g. Supabase Storage)."""
+    url = f"{OH_MIRROR_BASE_URL}/{county}.zip"
+    log.info("downloading (mirror) %s", url)
+
+    headers: dict[str, str] = {}
+    # If the mirror is a private Supabase Storage bucket, the service-role key
+    # also works as a bearer token against `/storage/v1/object/...` URLs.
+    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if service_key and "/storage/v1/" in url:
+        headers["Authorization"] = f"Bearer {service_key}"
+        headers["apikey"] = service_key
+
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, timeout=180)
+        except requests.RequestException as exc:
+            last_exc = exc
+            log.warning("[%s] mirror attempt %d network error: %s", county, attempt + 1, exc)
+            time.sleep(2 ** attempt)
+            continue
+
+        if resp.status_code == 404:
+            raise requests.HTTPError(f"404 Not Found for {url} — is the zip uploaded to the mirror?")
+
+        if resp.status_code >= 500 or resp.status_code == 429:
+            last_exc = requests.HTTPError(f"{resp.status_code} for {url}")
+            log.warning("[%s] mirror attempt %d -> %s; retrying", county, attempt + 1, resp.status_code)
+            time.sleep(2 ** attempt)
+            continue
+
+        resp.raise_for_status()
+        return resp.content
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"unable to download {county} from mirror")
 
 
 def iter_csv_from_zip(payload: bytes) -> Iterator[dict[str, str]]:
@@ -523,7 +580,8 @@ def main() -> int:
     counties_env = os.environ.get("OH_COUNTIES")
     counties = [c.strip().upper() for c in counties_env.split(",") if c.strip()] if counties_env else OH_ALL_COUNTIES
 
-    log.info("starting OH ingest for %d counties (dry_run=%s)", len(counties), DRY_RUN)
+    source = f"mirror={OH_MIRROR_BASE_URL}" if OH_MIRROR_BASE_URL else "source=ohiosos.gov"
+    log.info("starting OH ingest for %d counties (dry_run=%s, %s)", len(counties), DRY_RUN, source)
     started = time.monotonic()
     total_voters = 0
     total_history = 0

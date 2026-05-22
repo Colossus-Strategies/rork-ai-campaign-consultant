@@ -42,4 +42,8 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           OH_COUNTIES: ${{ github.event.inputs.counties }}
           DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
+          # Optional: point at a Supabase Storage (or any HTTPS) mirror of the
+          # SoS county zips to bypass the OH SoS 403 on GitHub Actions IPs.
+          # Expected layout: {base}/{COUNTY}.zip (e.g. ADAMS.zip, ALLEN.zip).
+          OH_VOTER_FILE_BASE_URL: ${{ secrets.OH_VOTER_FILE_BASE_URL }}
         run: python scripts/voter_ingest/oh_ingest.py
