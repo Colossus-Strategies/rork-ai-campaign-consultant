@@ -60,6 +60,11 @@ OH_BASE_URL = os.environ.get(
 # instead of the Ohio SoS portal. Expected layout: `{base}/{COUNTY}.zip`.
 OH_MIRROR_BASE_URL = os.environ.get("OH_VOTER_FILE_BASE_URL", "").rstrip("/")
 
+# When set, county files are read from this local directory instead of any
+# network source. Expected layout: `{dir}/{COUNTY}.zip` (case-insensitive),
+# or a single `.csv` with the same stem.
+OH_LOCAL_DIR = os.environ.get("OH_LOCAL_DIR", "").strip()
+
 OH_ALL_COUNTIES = [
     "ADAMS","ALLEN","ASHLAND","ASHTABULA","ATHENS","AUGLAIZE","BELMONT","BROWN",
     "BUTLER","CARROLL","CHAMPAIGN","CLARK","CLERMONT","CLINTON","COLUMBIANA",
@@ -221,9 +226,13 @@ def _get_oh_session() -> requests.Session:
 def fetch_county(county: str) -> bytes:
     """Download a single county voter file (zip or csv).
 
-    Prefers the OH_VOTER_FILE_BASE_URL mirror when configured; otherwise hits
-    the Ohio SoS portal directly (which 403s GitHub Actions IPs).
+    Prefers a local directory (OH_LOCAL_DIR) if set, then the
+    OH_VOTER_FILE_BASE_URL mirror, otherwise hits the Ohio SoS portal
+    directly (which 403s GitHub Actions IPs).
     """
+    if OH_LOCAL_DIR:
+        return _fetch_from_local_dir(county)
+
     if OH_MIRROR_BASE_URL:
         return _fetch_from_mirror(county)
 
@@ -268,6 +277,26 @@ def fetch_county(county: str) -> bytes:
     if last_exc:
         raise last_exc
     raise RuntimeError(f"unable to download {county}")
+
+
+def _fetch_from_local_dir(county: str) -> bytes:
+    """Read a county voter file from a local directory."""
+    base = os.path.expanduser(OH_LOCAL_DIR)
+    candidates = [
+        os.path.join(base, f"{county}.zip"),
+        os.path.join(base, f"{county.lower()}.zip"),
+        os.path.join(base, f"{county}.CSV"),
+        os.path.join(base, f"{county}.csv"),
+        os.path.join(base, f"{county.lower()}.csv"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            log.info("reading (local) %s", path)
+            with open(path, "rb") as f:
+                return f.read()
+    raise FileNotFoundError(
+        f"no local file for {county} in {base} (tried {', '.join(os.path.basename(c) for c in candidates)})"
+    )
 
 
 def _fetch_from_mirror(county: str) -> bytes:
