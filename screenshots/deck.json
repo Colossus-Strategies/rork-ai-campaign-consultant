@@ -1,0 +1,28 @@
+{
+  "theme": {
+    "style": "Deep charcoal and near-black backgrounds evoking the serious, high-stakes environment of a campaign war room, lit with burnished gold and warm amber accents that radiate authority and credibility. Lighting is dramatic and directional — reminiscent of polished marble halls and mahogany briefing rooms. Geometric forms feel deliberate and strategic, with subtle metallic sheen and depth-of-field refinement that signals a premium, professional-grade political tool.",
+    "headlineFont": "'Plus Jakarta Sans', sans-serif — @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@800&display=swap')",
+    "headlineFontSize": 128,
+    "mockupIds": {
+      "iphone": "deep-blue",
+      "ipad": "space-gray"
+    },
+    "palette": {
+      "primary": "#18181C",
+      "secondary": "#2B2617",
+      "accent": "#C9A448"
+    }
+  },
+  "slides": [
+    {
+      "label": "Race-Tailored Strategy",
+      "backgroundPrompt": "Abstract 3D rendered scene with sweeping molten gold and burnished amber arcs cutting diagonally across a vast deep charcoal and near-black base, rising from the lower right and dissolving into calm dark shadow in the upper third for text readability. Dramatic rim lighting from the upper left casts long warm gold highlights across floating translucent geometric shards, each edge catching a hairline of pale amber glow against the dark field. Subtle fine grain texture and depth-of-field blur at the edges give tactile depth and cinematic weight. 8K quality, ultra smooth gradients, premium feel, no text, no letters, no UI elements, no device mockups.",
+      "backgroundUrl": "https://r2-pub.rork.com/app-store-screenshots/9389d25c-c83d-4c6f-b01c-42431ce65297.png"
+    }
+  ],
+  "headlines": {
+    "en": {
+      "Race-Tailored Strategy": "Built For<br>Your Race"
+    }
+  }
+}

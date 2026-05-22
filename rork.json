@@ -1,0 +1,10 @@
+{
+  "$schema": "https://rork.com/schema/rork.json",
+  "apps": [
+    {
+      "name": "AI Campaign Consultant",
+      "path": "ios",
+      "framework": "swift"
+    }
+  ]
+}

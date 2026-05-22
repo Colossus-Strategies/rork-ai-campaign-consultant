@@ -1,0 +1,45 @@
+name: Ohio Voter File Ingest
+
+on:
+  schedule:
+    # Daily at 09:30 UTC (04:30 ET) — after the OH SoS nightly publish window.
+    - cron: "30 9 * * *"
+  workflow_dispatch:
+    inputs:
+      counties:
+        description: "Comma-separated OH counties to ingest (blank = all 88)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Parse only, no DB writes"
+        required: false
+        default: "false"
+
+concurrency:
+  group: voter-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    name: Ingest OH voter file
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/voter_ingest/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scripts/voter_ingest/requirements.txt
+
+      - name: Run ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OH_COUNTIES: ${{ github.event.inputs.counties }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
+        run: python scripts/voter_ingest/oh_ingest.py
