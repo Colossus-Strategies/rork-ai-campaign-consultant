@@ -6,7 +6,7 @@ on:
     - cron: "30 9 * * *"
   workflow_dispatch:
     inputs:
-      counties:mahoning
+      counties:
         description: "Comma-separated OH counties to ingest (blank = all 88)"
         required: false
         default: ""
