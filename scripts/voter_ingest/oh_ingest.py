@@ -161,11 +161,22 @@ def _classify_election(col: str) -> tuple[str, str] | None:
     return prefix_upper, parsed
 
 
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/zip,application/octet-stream,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www6.ohiosos.gov/ords/f?p=VOTERFTP:HOME",
+}
+
+
 def fetch_county(county: str) -> bytes:
     """Download a single county voter file (zip or csv) from the OH SoS portal."""
     url = f"{OH_BASE_URL}{county}"
     log.info("downloading %s", url)
-    resp = requests.get(url, timeout=180, stream=True)
+    resp = requests.get(url, timeout=180, stream=True, headers=BROWSER_HEADERS, allow_redirects=True)
     resp.raise_for_status()
     return resp.content
 
