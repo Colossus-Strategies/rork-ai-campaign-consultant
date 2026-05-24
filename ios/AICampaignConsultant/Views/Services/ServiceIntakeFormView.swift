@@ -67,7 +67,7 @@ struct ServiceIntakeFormView: View {
     @Environment(\.dismiss) private var dismiss
 
     // Recipient inbox — change to the real Colossus services address.
-    private let recipient: String = "services@colossus.app"
+    private let recipient: String = "anthony@colossus-strategies.com"
 
     // Campaign info
     @State private var campaignName: String = ""
