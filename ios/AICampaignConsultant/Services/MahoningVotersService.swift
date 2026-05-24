@@ -2,10 +2,13 @@
 //  MahoningVotersService.swift
 //  AICampaignConsultant
 //
-//  Live Mahoning County voter stats pulled directly from public.voters via
-//  PostgREST count=exact HEAD requests. No schema changes — every panel is
-//  a small set of parallel COUNT queries scoped to county=MAHONING and
-//  voter_status=ACTIVE. RLS still enforces who can read.
+//  Mahoning County voter stats. The overview / district / zip panels are
+//  served by a single Supabase RPC (`get_mahoning_stats`) that returns one
+//  JSON blob with everything pre-aggregated server-side — no more parallel
+//  COUNT fan-out and no more statement timeouts.
+//
+//  The door-list builder still uses direct PostgREST queries because it
+//  needs to filter/sort/page arbitrary subsets and return rows.
 //
 
 import Foundation
@@ -120,45 +123,95 @@ nonisolated enum MahoningVotersService {
         "44483", "44490", "44609", "44619", "44644", "44651"
     ]
 
+    // MARK: - RPC payload
+
+    /// Shape of the JSON returned by `public.get_mahoning_stats()`.
+    private struct StatsPayload: Decodable {
+        let total_active: Int?
+        let dem: Int?
+        let rep: Int?
+        let unaffiliated: Int?
+        let cd06_hd59: Int?
+        let cd06_hd58: Int?
+        let cd14_hd58: Int?
+        let cd14_hd59: Int?
+        let top_zips: [ZipRow]?
+        struct ZipRow: Decodable {
+            let zip: String?
+            let total: Int?
+            let dem: Int?
+            let rep: Int?
+            let unaffiliated: Int?
+        }
+    }
+
     // MARK: - Public
 
-    /// Serialized so we never fan out more than a handful of COUNTs in
-    /// parallel — large parallel HEAD bursts were triggering Postgres
-    /// statement timeouts (surfacing as a 500 from PostgREST).
     static func overview(session: SupabaseSession) async throws -> MahoningOverview {
-        let t = try await count(session: session, extras: [])
-        let d = try await count(session: session, extras: [("party_affiliation", "eq.D")])
-        let r = try await count(session: session, extras: [("party_affiliation", "eq.R")])
-        // Anyone not D or R is treated as Unaffiliated — matches how OH SoS
-        // ships the file (blank party = unaffiliated).
-        let una = max(0, t - d - r)
-        return .init(total: t, democrat: d, republican: r, unaffiliated: una)
+        let s = try await stats(session: session)
+        let t = s.total_active ?? 0
+        let d = s.dem ?? 0
+        let r = s.rep ?? 0
+        let u = s.unaffiliated ?? max(0, t - d - r)
+        return .init(total: t, democrat: d, republican: r, unaffiliated: u)
     }
 
     static func districtBreakdown(session: SupabaseSession) async throws -> [MahoningDistrictRow] {
-        var rows: [MahoningDistrictRow] = []
-        for d in districts {
-            let n = try await count(session: session, extras: [
-                ("congressional_district", "eq.\(d.cd)"),
-                ("state_rep_district", "eq.\(d.hd)"),
-                ("state_senate_district", "eq.\(d.sd)"),
-            ])
-            rows.append(MahoningDistrictRow(congressional: d.cd, house: d.hd, senate: d.sd, total: n))
-        }
+        let s = try await stats(session: session)
+        let rows: [MahoningDistrictRow] = [
+            .init(congressional: "06", house: "59", senate: "33", total: s.cd06_hd59 ?? 0),
+            .init(congressional: "06", house: "58", senate: "33", total: s.cd06_hd58 ?? 0),
+            .init(congressional: "14", house: "58", senate: "33", total: s.cd14_hd58 ?? 0),
+            .init(congressional: "14", house: "59", senate: "33", total: s.cd14_hd59 ?? 0),
+        ]
         return rows.sorted { $0.total > $1.total }
     }
 
     static func zipBreakdown(session: SupabaseSession, topN: Int = 10) async throws -> [MahoningZipRow] {
-        var rows: [MahoningZipRow] = []
-        for zip in candidateZips {
-            let t = try await count(session: session, extras: [("zip", "eq.\(zip)")])
-            if t == 0 { continue }
-            let d = try await count(session: session, extras: [("zip", "eq.\(zip)"), ("party_affiliation", "eq.D")])
-            let r = try await count(session: session, extras: [("zip", "eq.\(zip)"), ("party_affiliation", "eq.R")])
-            let u = max(0, t - d - r)
-            rows.append(MahoningZipRow(zip: zip, total: t, democrat: d, republican: r, unaffiliated: u))
+        let s = try await stats(session: session)
+        let rows = (s.top_zips ?? []).compactMap { z -> MahoningZipRow? in
+            guard let zip = z.zip, !zip.isEmpty else { return nil }
+            let t = z.total ?? 0
+            let d = z.dem ?? 0
+            let r = z.rep ?? 0
+            let u = z.unaffiliated ?? max(0, t - d - r)
+            return MahoningZipRow(zip: zip, total: t, democrat: d, republican: r, unaffiliated: u)
         }
         return Array(rows.sorted { $0.total > $1.total }.prefix(topN))
+    }
+
+    /// Calls `public.get_mahoning_stats()` and decodes its JSON payload.
+    /// PostgREST RPCs that return a single composite/json value come back
+    /// as either a bare object or a single-element array depending on how
+    /// the function is declared — we handle both.
+    private static func stats(session: SupabaseSession) async throws -> StatsPayload {
+        guard SupabaseClient.isConfigured, let base = SupabaseClient.baseURL else {
+            throw VoterDataError.notConfigured
+        }
+        let url = base.appendingPathComponent("/rest/v1/rpc/get_mahoning_stats")
+        let bearer = try authenticatedBearer(session)
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue(SupabaseClient.anonKey, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.httpBody = Data("{}".utf8)
+        req.timeoutInterval = 30
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw VoterDataError.decoding }
+        if !(200..<300).contains(http.statusCode) {
+            throw VoterDataError.http(http.statusCode, extractMessage(from: data))
+        }
+        let decoder = JSONDecoder()
+        if let single = try? decoder.decode(StatsPayload.self, from: data) {
+            return single
+        }
+        if let arr = try? decoder.decode([StatsPayload].self, from: data), let first = arr.first {
+            return first
+        }
+        throw VoterDataError.decoding
     }
 
     // MARK: - Door List
@@ -248,9 +301,8 @@ nonisolated enum MahoningVotersService {
 
     // MARK: - HTTP
 
-    /// Issues a PostgREST HEAD request with `Prefer: count=exact` against
-    /// public.voters, scoped to MAHONING / ACTIVE, plus any extra filters.
-    /// Returns the parsed `Content-Range` total.
+    /// PostgREST count helper, still used by the door-list builder to preview
+    /// list size before fetching rows. Scoped to ACTIVE plus any extras.
     private static func count(
         session: SupabaseSession,
         extras: [(String, String)]
