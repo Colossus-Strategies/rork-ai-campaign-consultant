@@ -122,13 +122,13 @@ nonisolated enum MahoningVotersService {
 
     // MARK: - Public
 
+    /// Serialized so we never fan out more than a handful of COUNTs in
+    /// parallel — large parallel HEAD bursts were triggering Postgres
+    /// statement timeouts (surfacing as a 500 from PostgREST).
     static func overview(session: SupabaseSession) async throws -> MahoningOverview {
-        async let total = count(session: session, extras: [])
-        async let dem   = count(session: session, extras: [("party_affiliation", "eq.D")])
-        async let rep   = count(session: session, extras: [("party_affiliation", "eq.R")])
-        let t = try await total
-        let d = try await dem
-        let r = try await rep
+        let t = try await count(session: session, extras: [])
+        let d = try await count(session: session, extras: [("party_affiliation", "eq.D")])
+        let r = try await count(session: session, extras: [("party_affiliation", "eq.R")])
         // Anyone not D or R is treated as Unaffiliated — matches how OH SoS
         // ships the file (blank party = unaffiliated).
         let una = max(0, t - d - r)
@@ -136,41 +136,27 @@ nonisolated enum MahoningVotersService {
     }
 
     static func districtBreakdown(session: SupabaseSession) async throws -> [MahoningDistrictRow] {
-        try await withThrowingTaskGroup(of: MahoningDistrictRow.self) { group in
-            for d in districts {
-                group.addTask {
-                    let n = try await count(session: session, extras: [
-                        ("congressional_district", "eq.\(d.cd)"),
-                        ("state_rep_district", "eq.\(d.hd)"),
-                        ("state_senate_district", "eq.\(d.sd)"),
-                    ])
-                    return MahoningDistrictRow(congressional: d.cd, house: d.hd, senate: d.sd, total: n)
-                }
-            }
-            var rows: [MahoningDistrictRow] = []
-            for try await r in group { rows.append(r) }
-            return rows.sorted { $0.total > $1.total }
+        var rows: [MahoningDistrictRow] = []
+        for d in districts {
+            let n = try await count(session: session, extras: [
+                ("congressional_district", "eq.\(d.cd)"),
+                ("state_rep_district", "eq.\(d.hd)"),
+                ("state_senate_district", "eq.\(d.sd)"),
+            ])
+            rows.append(MahoningDistrictRow(congressional: d.cd, house: d.hd, senate: d.sd, total: n))
         }
+        return rows.sorted { $0.total > $1.total }
     }
 
     static func zipBreakdown(session: SupabaseSession, topN: Int = 10) async throws -> [MahoningZipRow] {
-        let rows = try await withThrowingTaskGroup(of: MahoningZipRow?.self) { group -> [MahoningZipRow] in
-            for zip in candidateZips {
-                group.addTask {
-                    async let total = count(session: session, extras: [("zip", "eq.\(zip)")])
-                    async let dem   = count(session: session, extras: [("zip", "eq.\(zip)"), ("party_affiliation", "eq.D")])
-                    async let rep   = count(session: session, extras: [("zip", "eq.\(zip)"), ("party_affiliation", "eq.R")])
-                    let t = try await total
-                    if t == 0 { return nil }
-                    let d = try await dem
-                    let r = try await rep
-                    let u = max(0, t - d - r)
-                    return MahoningZipRow(zip: zip, total: t, democrat: d, republican: r, unaffiliated: u)
-                }
-            }
-            var out: [MahoningZipRow] = []
-            for try await r in group { if let r { out.append(r) } }
-            return out
+        var rows: [MahoningZipRow] = []
+        for zip in candidateZips {
+            let t = try await count(session: session, extras: [("zip", "eq.\(zip)")])
+            if t == 0 { continue }
+            let d = try await count(session: session, extras: [("zip", "eq.\(zip)"), ("party_affiliation", "eq.D")])
+            let r = try await count(session: session, extras: [("zip", "eq.\(zip)"), ("party_affiliation", "eq.R")])
+            let u = max(0, t - d - r)
+            rows.append(MahoningZipRow(zip: zip, total: t, democrat: d, republican: r, unaffiliated: u))
         }
         return Array(rows.sorted { $0.total > $1.total }.prefix(topN))
     }
@@ -210,7 +196,10 @@ nonisolated enum MahoningVotersService {
         comps?.queryItems = items
         guard let url = comps?.url else { throw VoterDataError.decoding }
 
-        let bearer = session.isSynthetic ? SupabaseClient.anonKey : session.accessToken
+        // Always use the user's JWT for table reads — RLS on public.voters
+        // is the only thing standing between the anon role and the data, so
+        // we refuse to fall back to the anon key here.
+        let bearer = try authenticatedBearer(session)
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         req.setValue(SupabaseClient.anonKey, forHTTPHeaderField: "apikey")
@@ -221,7 +210,7 @@ nonisolated enum MahoningVotersService {
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw VoterDataError.decoding }
         if !(200..<300).contains(http.statusCode) {
-            throw VoterDataError.http(http.statusCode, nil)
+            throw VoterDataError.http(http.statusCode, extractMessage(from: data))
         }
         do {
             return try JSONDecoder().decode([DoorListVoter].self, from: data)
@@ -281,19 +270,27 @@ nonisolated enum MahoningVotersService {
         comps?.queryItems = items
         guard let url = comps?.url else { throw VoterDataError.decoding }
 
-        let bearer = session.isSynthetic ? SupabaseClient.anonKey : session.accessToken
+        // GET (not HEAD) so PostgREST returns an error body we can surface
+        // when something goes wrong (RLS deny, statement timeout, etc.).
+        // We still keep the response tiny via `Range: items=0-0` and only
+        // select the primary key column.
+        let bearer = try authenticatedBearer(session)
         var req = URLRequest(url: url)
-        req.httpMethod = "HEAD"
+        req.httpMethod = "GET"
         req.setValue(SupabaseClient.anonKey, forHTTPHeaderField: "apikey")
         req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
-        req.setValue("count=exact", forHTTPHeaderField: "Prefer")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        // count=planned uses the planner's estimate — orders of magnitude
+        // cheaper than count=exact on a 150k+ row table, which was the
+        // source of the 500s when several COUNTs fanned out at once.
+        req.setValue("count=planned", forHTTPHeaderField: "Prefer")
         req.setValue("items=0-0", forHTTPHeaderField: "Range")
         req.timeoutInterval = 30
 
-        let (_, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw VoterDataError.decoding }
         if !(200..<300).contains(http.statusCode) && http.statusCode != 206 {
-            throw VoterDataError.http(http.statusCode, nil)
+            throw VoterDataError.http(http.statusCode, extractMessage(from: data))
         }
         // Content-Range: "0-0/129551" (or "*/129551" when range is empty)
         if let cr = http.value(forHTTPHeaderField: "Content-Range"),
@@ -302,5 +299,29 @@ nonisolated enum MahoningVotersService {
             return Int(tail) ?? 0
         }
         return 0
+    }
+
+    /// Returns the user's JWT or throws a clear error if the session is
+    /// synthetic (demo / pending email confirmation). The anon role is NOT
+    /// granted SELECT on `public.voters`, so silently falling back to it
+    /// would just produce the 500 the user sees.
+    private static func authenticatedBearer(_ session: SupabaseSession) throws -> String {
+        if session.isSynthetic { throw VoterDataError.pendingConfirmation }
+        return session.accessToken
+    }
+
+    /// Best-effort extraction of PostgREST's error message body so the UI
+    /// shows the real cause (e.g. "permission denied for table voters",
+    /// "canceling statement due to statement timeout") instead of just 500.
+    private static func extractMessage(from data: Data) -> String? {
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for k in ["message", "error_description", "error", "hint", "details"] {
+                if let s = obj[k] as? String, !s.isEmpty { return s }
+            }
+        }
+        if let s = String(data: data, encoding: .utf8), !s.isEmpty {
+            return String(s.prefix(240))
+        }
+        return nil
     }
 }
