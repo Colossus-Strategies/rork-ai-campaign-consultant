@@ -69,6 +69,46 @@ logging.basicConfig(
 )
 log = logging.getLogger("oh_ingest")
 
+
+def _load_dotenv_files() -> None:
+    """Auto-load `.env` files (without overriding already-set env vars).
+
+    Looks in (in order): the script directory, its parent (scripts/), and the
+    current working directory. This makes `OH_SUPABASE_STORAGE_URL=...` in a
+    local `.env` Just Work without forcing the user to `export` it manually.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, ".env"),
+        os.path.join(os.path.dirname(here), ".env"),
+        os.path.join(os.getcwd(), ".env"),
+    ]
+    seen: set[str] = set()
+    for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    if line.lower().startswith("export "):
+                        line = line[7:].lstrip()
+                    k, _, v = line.partition("=")
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+            log.info("loaded env from %s", path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read %s: %s", path, exc)
+
+
+_load_dotenv_files()
+
 OH_BASE_URL = os.environ.get(
     "OH_BASE_URL",
     "https://www6.ohiosos.gov/ords/f?p=VOTERFTP:DOWNLOAD::FILE:NO:RP:P1_TYPE,P1_NAME:CTY,",
@@ -81,20 +121,48 @@ OH_MIRROR_BASE_URL = os.environ.get("OH_VOTER_FILE_BASE_URL", "").rstrip("/")
 # When set, county files are read from this local directory instead of any
 # network source. Expected layout: `{dir}/{COUNTY}.zip` (case-insensitive),
 # or a single `.csv` with the same stem.
-OH_LOCAL_DIR = os.environ.get("OH_LOCAL_DIR", "").strip()
+# NOTE: these names are kept here purely as documentation. The actual values
+# are resolved fresh inside main() via _resolve_sources() so that env vars set
+# after import (e.g. through a .env loader or a wrapping script) are still
+# picked up. Do NOT read these globals elsewhere — call _resolve_sources().
+OH_LOCAL_DIR = ""
+OH_COMBINED_FILE = ""
+OH_COMBINED_URL = ""
 
-# When set, the script reads a single combined CSV containing rows for all
-# counties and routes each row to a per-county upsert buffer.
-OH_COMBINED_FILE = os.environ.get("OH_COMBINED_FILE", "").strip()
 
-# When set, the script downloads the combined file (csv or zip) from this URL
-# and ingests it. Takes precedence over OH_COMBINED_FILE when both are set.
-# OH_SUPABASE_STORAGE_URL is a user-friendly alias for the same thing and wins
-# when both are populated.
-OH_COMBINED_URL = (
-    os.environ.get("OH_SUPABASE_STORAGE_URL", "").strip()
-    or os.environ.get("OH_COMBINED_URL", "").strip()
-)
+def _resolve_sources() -> dict[str, str]:
+    """Resolve all source-selection env vars at call time.
+
+    Returns a dict with the chosen values plus a `chosen` key indicating which
+    source the script will use: one of `combined_url`, `combined_file`,
+    `local_dir`, `mirror`, or `sos`.
+    """
+    local_dir     = os.environ.get("OH_LOCAL_DIR", "").strip()
+    combined_file = os.environ.get("OH_COMBINED_FILE", "").strip()
+    combined_url  = (
+        os.environ.get("OH_SUPABASE_STORAGE_URL", "").strip()
+        or os.environ.get("OH_COMBINED_URL", "").strip()
+    )
+    mirror_base   = os.environ.get("OH_VOTER_FILE_BASE_URL", "").strip().rstrip("/")
+
+    if combined_url:
+        chosen = "combined_url"
+    elif combined_file:
+        chosen = "combined_file"
+    elif local_dir:
+        chosen = "local_dir"
+    elif mirror_base:
+        chosen = "mirror"
+    else:
+        chosen = "sos"
+
+    return {
+        "chosen": chosen,
+        "combined_url": combined_url,
+        "combined_file": combined_file,
+        "local_dir": local_dir,
+        "mirror_base": mirror_base,
+    }
 
 OH_ALL_COUNTIES = [
     "ADAMS","ALLEN","ASHLAND","ASHTABULA","ATHENS","AUGLAIZE","BELMONT","BROWN",
@@ -261,11 +329,13 @@ def fetch_county(county: str) -> bytes:
     OH_VOTER_FILE_BASE_URL mirror, otherwise hits the Ohio SoS portal
     directly (which 403s GitHub Actions IPs).
     """
-    if OH_LOCAL_DIR:
-        return _fetch_from_local_dir(county)
+    local_dir = os.environ.get("OH_LOCAL_DIR", "").strip()
+    mirror_base = os.environ.get("OH_VOTER_FILE_BASE_URL", "").strip().rstrip("/")
+    if local_dir:
+        return _fetch_from_local_dir(county, local_dir)
 
-    if OH_MIRROR_BASE_URL:
-        return _fetch_from_mirror(county)
+    if mirror_base:
+        return _fetch_from_mirror(county, mirror_base)
 
     url = f"{OH_BASE_URL}{county}"
     log.info("downloading %s", url)
@@ -310,9 +380,9 @@ def fetch_county(county: str) -> bytes:
     raise RuntimeError(f"unable to download {county}")
 
 
-def _fetch_from_local_dir(county: str) -> bytes:
+def _fetch_from_local_dir(county: str, local_dir: str = "") -> bytes:
     """Read a county voter file from a local directory."""
-    base = os.path.expanduser(OH_LOCAL_DIR)
+    base = os.path.expanduser(local_dir or os.environ.get("OH_LOCAL_DIR", ""))
     candidates = [
         os.path.join(base, f"{county}.zip"),
         os.path.join(base, f"{county.lower()}.zip"),
@@ -330,9 +400,10 @@ def _fetch_from_local_dir(county: str) -> bytes:
     )
 
 
-def _fetch_from_mirror(county: str) -> bytes:
+def _fetch_from_mirror(county: str, mirror_base: str = "") -> bytes:
     """Pull a county zip from the configured mirror (e.g. Supabase Storage)."""
-    url = f"{OH_MIRROR_BASE_URL}/{county}.zip"
+    base = (mirror_base or os.environ.get("OH_VOTER_FILE_BASE_URL", "")).rstrip("/")
+    url = f"{base}/{county}.zip"
     log.info("downloading (mirror) %s", url)
 
     headers: dict[str, str] = {}
@@ -804,17 +875,33 @@ def main() -> int:
     counties_env = os.environ.get("OH_COUNTIES")
     counties = [c.strip().upper() for c in counties_env.split(",") if c.strip()] if counties_env else OH_ALL_COUNTIES
 
-    if OH_COMBINED_URL:
+    # Resolve all source-selection env vars fresh, so anything set after import
+    # (e.g. via a .env loader or a wrapping shell script) is honored.
+    src = _resolve_sources()
+
+    # Diagnostic dump so the user can see exactly what the script sees.
+    def _mask(v: str) -> str:
+        if not v:
+            return "<unset>"
+        return v if len(v) <= 80 else v[:60] + "…" + v[-12:]
+    log.info("env: OH_SUPABASE_STORAGE_URL=%s", _mask(os.environ.get("OH_SUPABASE_STORAGE_URL", "")))
+    log.info("env: OH_COMBINED_URL=%s",         _mask(os.environ.get("OH_COMBINED_URL", "")))
+    log.info("env: OH_COMBINED_FILE=%s",        _mask(os.environ.get("OH_COMBINED_FILE", "")))
+    log.info("env: OH_LOCAL_DIR=%s",            _mask(os.environ.get("OH_LOCAL_DIR", "")))
+    log.info("env: OH_VOTER_FILE_BASE_URL=%s",  _mask(os.environ.get("OH_VOTER_FILE_BASE_URL", "")))
+    log.info("resolved source = %s", src["chosen"])
+
+    if src["chosen"] == "combined_url":
         log.info(
-            "OH_COMBINED_URL/OH_SUPABASE_STORAGE_URL is set — skipping per-county SoS downloads and ingesting the combined file only"
+            "OH_SUPABASE_STORAGE_URL/OH_COMBINED_URL is set — skipping per-county SoS downloads and ingesting the combined file only"
         )
-        source = f"combined_url={OH_COMBINED_URL}"
-    elif OH_COMBINED_FILE:
-        source = f"combined={OH_COMBINED_FILE}"
-    elif OH_LOCAL_DIR:
-        source = f"local={OH_LOCAL_DIR}"
-    elif OH_MIRROR_BASE_URL:
-        source = f"mirror={OH_MIRROR_BASE_URL}"
+        source = f"combined_url={_mask(src['combined_url'])}"
+    elif src["chosen"] == "combined_file":
+        source = f"combined={src['combined_file']}"
+    elif src["chosen"] == "local_dir":
+        source = f"local={src['local_dir']}"
+    elif src["chosen"] == "mirror":
+        source = f"mirror={src['mirror_base']}"
     else:
         source = "source=ohiosos.gov"
     log.info("starting OH ingest for %d counties (dry_run=%s, %s)", len(counties), DRY_RUN, source)
@@ -824,14 +911,14 @@ def main() -> int:
 
     # Combined-CSV path: stream one giant file and route rows by county.
     combined_path = ""
-    if OH_COMBINED_URL:
+    if src["chosen"] == "combined_url":
         try:
-            combined_path = download_combined_url(OH_COMBINED_URL)
+            combined_path = download_combined_url(src["combined_url"])
         except Exception as exc:  # noqa: BLE001
-            log.exception("failed to download OH_COMBINED_URL")
+            log.exception("failed to download combined URL")
             return 1
-    elif OH_COMBINED_FILE:
-        combined_path = OH_COMBINED_FILE
+    elif src["chosen"] == "combined_file":
+        combined_path = src["combined_file"]
 
     if combined_path:
         if not os.path.isfile(os.path.expanduser(combined_path)):
