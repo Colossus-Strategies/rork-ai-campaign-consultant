@@ -654,10 +654,29 @@ def upsert_county(client: SupabaseRest, county: str, rows: Iterable[tuple[VoterR
     return voter_count, history_count
 
 
+def _strip_nuls(stream: Iterator[str]) -> Iterator[str]:
+    """Filter out embedded NUL (\x00) bytes from each text line.
+
+    Files exported from Windows / SQL Server sometimes contain stray NULs
+    that crash `csv.reader` with `_csv.Error: line contains NUL`.
+    """
+    nul_lines = 0
+    for line in stream:
+        if "\x00" in line:
+            nul_lines += 1
+            if nul_lines <= 5:
+                log.warning("stripped NUL bytes from line (occurrence #%d)", nul_lines)
+            line = line.replace("\x00", "")
+        yield line
+    if nul_lines:
+        log.warning("total lines with stripped NUL bytes: %d", nul_lines)
+
+
 def _iter_combined_csv(path: str) -> Iterator[dict[str, str]]:
     """Stream rows from a single combined CSV (all counties in one file).
 
     Transparently handles both raw `.csv` and `.zip` containing one CSV.
+    NUL bytes are stripped from every line before parsing.
     """
     expanded = os.path.expanduser(path)
     log.info("reading combined file %s", expanded)
@@ -669,12 +688,13 @@ def _iter_combined_csv(path: str) -> Iterator[dict[str, str]]:
             for name in csv_names:
                 log.info("reading combined CSV entry %s", name)
                 with zf.open(name) as f:
-                    reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8-sig", errors="replace"))
+                    text = io.TextIOWrapper(f, encoding="utf-8-sig", errors="replace", newline="")
+                    reader = csv.DictReader(_strip_nuls(text))
                     for row in reader:
                         yield row
         return
     with open(expanded, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
-        reader = csv.DictReader(f)
+        reader = csv.DictReader(_strip_nuls(f))
         for row in reader:
             yield row
 
