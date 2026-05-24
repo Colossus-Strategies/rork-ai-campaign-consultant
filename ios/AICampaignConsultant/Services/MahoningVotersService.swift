@@ -202,7 +202,6 @@ nonisolated enum MahoningVotersService {
         )
         var items: [URLQueryItem] = [
             .init(name: "select", value: "sos_voterid,first_name,last_name,residential_address,city,zip,party_affiliation"),
-            .init(name: "county", value: "eq.\(county)"),
             .init(name: "voter_status", value: "eq.ACTIVE"),
             .init(name: "order", value: "zip.asc,residential_address.asc"),
             .init(name: "limit", value: "\(limit)"),
@@ -276,7 +275,6 @@ nonisolated enum MahoningVotersService {
         )
         var items: [URLQueryItem] = [
             .init(name: "select", value: "id"),
-            .init(name: "county", value: "eq.\(county)"),
             .init(name: "voter_status", value: "eq.ACTIVE"),
         ]
         for (k, v) in extras { items.append(.init(name: k, value: v)) }
