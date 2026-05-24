@@ -16,6 +16,7 @@ struct MahoningVotersView: View {
     @State private var zips: [MahoningZipRow] = []
     @State private var loading: Bool = true
     @State private var loadError: String?
+    @State private var showDoorList: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +30,7 @@ struct MahoningVotersView: View {
                         errorCard(err)
                     } else {
                         if let o = overview { summaryCard(o); partyCard(o) }
+                        doorListCTA
                         districtsCard
                         zipsCard
                         footer
@@ -41,6 +43,52 @@ struct MahoningVotersView: View {
         }
         .background(Theme.bg.ignoresSafeArea())
         .task { await load() }
+        .sheet(isPresented: $showDoorList) {
+            DoorListBuilderView(
+                session: session,
+                availableZips: zips.isEmpty
+                    ? MahoningVotersService.candidateZips
+                    : zips.map(\.zip)
+            )
+        }
+    }
+
+    // MARK: - Door List CTA
+
+    private var doorListCTA: some View {
+        Button {
+            showDoorList = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "figure.walk")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(Theme.bg)
+                    .frame(width: 36, height: 36)
+                    .background(Theme.gold)
+                    .clipShape(.rect(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Build a Door List")
+                        .font(Theme.sans(13, weight: .bold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("Filter by ZIP, party & district")
+                        .font(Theme.sans(11, weight: .semibold))
+                        .foregroundStyle(Theme.textMuted)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Theme.gold)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface)
+            .clipShape(.rect(cornerRadius: 14))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(Theme.goldFaint, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Header
