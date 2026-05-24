@@ -18,6 +18,12 @@ Environment:
                                a Supabase Storage bucket (or any HTTPS host)
                                that mirrors the SoS zips, bypassing the SoS
                                anti-bot 403 on GitHub Actions IPs.
+  OH_COMBINED_FILE             Optional path to a single CSV containing rows
+                               for ALL counties at once (e.g.
+                               ohio_voters_combined.csv). When set, the
+                               script streams the file, groups rows by their
+                               COUNTY_ID column, and upserts per-county in
+                               batches — no per-county splitting needed.
   DRY_RUN                      "1" to skip writes.
 
 Schema reference: ios/AICampaignConsultant/Services/VoterDataSchema.sql
@@ -64,6 +70,10 @@ OH_MIRROR_BASE_URL = os.environ.get("OH_VOTER_FILE_BASE_URL", "").rstrip("/")
 # network source. Expected layout: `{dir}/{COUNTY}.zip` (case-insensitive),
 # or a single `.csv` with the same stem.
 OH_LOCAL_DIR = os.environ.get("OH_LOCAL_DIR", "").strip()
+
+# When set, the script reads a single combined CSV containing rows for all
+# counties and routes each row to a per-county upsert buffer.
+OH_COMBINED_FILE = os.environ.get("OH_COMBINED_FILE", "").strip()
 
 OH_ALL_COUNTIES = [
     "ADAMS","ALLEN","ASHLAND","ASHTABULA","ATHENS","AUGLAIZE","BELMONT","BROWN",
@@ -478,68 +488,164 @@ def _voter_payload(v: VoterRow) -> dict[str, Any]:
     return payload
 
 
+def _flush_voter_buffer(
+    client: SupabaseRest,
+    voter_buf: list[VoterRow],
+    history_buf: list[tuple[str, HistoryRow]],
+) -> tuple[int, int]:
+    """Upsert one buffered batch of voters + their history. Returns (v, h)."""
+    if not voter_buf:
+        return 0, 0
+
+    voter_payloads = [_voter_payload(v) for v in voter_buf]
+    returned = client.upsert(
+        "voters", voter_payloads,
+        on_conflict="state_code,external_voterid",
+        returning=True,
+    )
+    v_count = len(voter_buf)
+
+    id_map: dict[str, str] = {}
+    for row in returned:
+        ext = row.get("external_voterid")
+        vid = row.get("id")
+        if ext and vid:
+            id_map[ext] = vid
+
+    history_payloads = [
+        {
+            "voter_id": id_map[ext_id],
+            "election_date": h.election_date,
+            "election_type": h.election_type,
+            "party_voted": h.party_voted,
+        }
+        for ext_id, h in history_buf
+        if ext_id in id_map
+    ]
+    h_count = 0
+    if history_payloads:
+        for i in range(0, len(history_payloads), BATCH_SIZE):
+            chunk = history_payloads[i:i + BATCH_SIZE]
+            client.upsert(
+                "voter_history", chunk,
+                on_conflict="voter_id,election_date",
+                returning=False,
+            )
+            h_count += len(chunk)
+
+    voter_buf.clear()
+    history_buf.clear()
+    return v_count, h_count
+
+
 def upsert_county(client: SupabaseRest, county: str, rows: Iterable[tuple[VoterRow, list[HistoryRow]]]) -> tuple[int, int]:
     """Upsert one county's voters + history via REST. Returns (voters, history)."""
     voter_count = 0
     history_count = 0
 
     voter_buf: list[VoterRow] = []
-    history_buf: list[tuple[str, HistoryRow]] = []  # (external_voterid, row)
-
-    def flush() -> None:
-        nonlocal voter_count, history_count
-        if not voter_buf:
-            return
-
-        voter_payloads = [_voter_payload(v) for v in voter_buf]
-        returned = client.upsert(
-            "voters", voter_payloads,
-            on_conflict="state_code,external_voterid",
-            returning=True,
-        )
-        voter_count += len(voter_buf)
-
-        id_map: dict[str, str] = {}
-        for row in returned:
-            ext = row.get("external_voterid")
-            vid = row.get("id")
-            if ext and vid:
-                id_map[ext] = vid
-
-        history_payloads = [
-            {
-                "voter_id": id_map[ext_id],
-                "election_date": h.election_date,
-                "election_type": h.election_type,
-                "party_voted": h.party_voted,
-            }
-            for ext_id, h in history_buf
-            if ext_id in id_map
-        ]
-        if history_payloads:
-            # Chunk history so we don't ship 30k rows in one request.
-            for i in range(0, len(history_payloads), BATCH_SIZE):
-                chunk = history_payloads[i:i + BATCH_SIZE]
-                client.upsert(
-                    "voter_history", chunk,
-                    on_conflict="voter_id,election_date",
-                    returning=False,
-                )
-                history_count += len(chunk)
-
-        voter_buf.clear()
-        history_buf.clear()
+    history_buf: list[tuple[str, HistoryRow]] = []
 
     for voter, history in rows:
         voter_buf.append(voter)
         for h in history:
             history_buf.append((voter.external_voterid, h))
         if len(voter_buf) >= BATCH_SIZE:
-            flush()
+            v, h = _flush_voter_buffer(client, voter_buf, history_buf)
+            voter_count += v
+            history_count += h
 
-    flush()
+    v, h = _flush_voter_buffer(client, voter_buf, history_buf)
+    voter_count += v
+    history_count += h
     log.info("[%s] upserted %d voters, %d history rows", county, voter_count, history_count)
     return voter_count, history_count
+
+
+def _iter_combined_csv(path: str) -> Iterator[dict[str, str]]:
+    """Stream rows from a single combined CSV (all counties in one file)."""
+    expanded = os.path.expanduser(path)
+    log.info("reading combined CSV %s", expanded)
+    with open(expanded, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            yield row
+
+
+def ingest_combined_file(
+    client: SupabaseRest,
+    path: str,
+    county_filter: set[str] | None,
+    run_id: str,
+) -> tuple[int, int, int]:
+    """Stream a single combined CSV and upsert per-county in batches.
+
+    Returns (total_voters, total_history, failed_county_count).
+    """
+    # Per-county streaming buffers — flushed individually when they hit BATCH_SIZE.
+    voter_bufs: dict[str, list[VoterRow]] = {}
+    history_bufs: dict[str, list[tuple[str, HistoryRow]]] = {}
+    started_by_county: dict[str, str] = {}
+    totals_by_county: dict[str, tuple[int, int]] = {}
+
+    total_v = 0
+    total_h = 0
+
+    def _start(county: str) -> None:
+        if county not in voter_bufs:
+            voter_bufs[county] = []
+            history_bufs[county] = []
+            started_by_county[county] = datetime.now(timezone.utc).isoformat()
+            totals_by_county[county] = (0, 0)
+
+    def _flush(county: str) -> None:
+        nonlocal total_v, total_h
+        v, h = _flush_voter_buffer(client, voter_bufs[county], history_bufs[county])
+        cv, ch = totals_by_county[county]
+        totals_by_county[county] = (cv + v, ch + h)
+        total_v += v
+        total_h += h
+
+    raw_rows = _iter_combined_csv(path)
+    seen_rows = 0
+    for raw in raw_rows:
+        seen_rows += 1
+        # Combined CSVs may carry the county on each row; fall back to UNKNOWN.
+        county = (_nz(raw.get(COL_COUNTY_NAME)) or "UNKNOWN").upper().replace(" ", "_")
+        if county_filter and county not in county_filter:
+            continue
+
+        ext_id = _nz(raw.get(COL_SOS_ID))
+        if not ext_id:
+            continue
+
+        # Reuse the same per-row parser as the per-county path.
+        for voter, history in parse_rows(county, [raw]):
+            _start(county)
+            voter_bufs[county].append(voter)
+            for h in history:
+                history_bufs[county].append((voter.external_voterid, h))
+            if len(voter_bufs[county]) >= BATCH_SIZE:
+                _flush(county)
+
+        if seen_rows % 50000 == 0:
+            log.info("combined: scanned %d rows (%d counties touched so far)", seen_rows, len(voter_bufs))
+
+    # Final flush for every county we touched.
+    for county in list(voter_bufs.keys()):
+        if voter_bufs[county]:
+            _flush(county)
+        cv, ch = totals_by_county[county]
+        log.info("[%s] upserted %d voters, %d history rows", county, cv, ch)
+        log_run(
+            client, run_id=run_id, county=county, status="success",
+            rows_upserted=cv, history_upserted=ch,
+            started_at=started_by_county[county],
+            ended_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    log.info("combined ingest complete: %d rows scanned, %d counties", seen_rows, len(voter_bufs))
+    return total_v, total_h, 0
 
 
 # ---------------------------------------------------------------------------
@@ -609,11 +715,68 @@ def main() -> int:
     counties_env = os.environ.get("OH_COUNTIES")
     counties = [c.strip().upper() for c in counties_env.split(",") if c.strip()] if counties_env else OH_ALL_COUNTIES
 
-    source = f"mirror={OH_MIRROR_BASE_URL}" if OH_MIRROR_BASE_URL else "source=ohiosos.gov"
+    if OH_COMBINED_FILE:
+        source = f"combined={OH_COMBINED_FILE}"
+    elif OH_LOCAL_DIR:
+        source = f"local={OH_LOCAL_DIR}"
+    elif OH_MIRROR_BASE_URL:
+        source = f"mirror={OH_MIRROR_BASE_URL}"
+    else:
+        source = "source=ohiosos.gov"
     log.info("starting OH ingest for %d counties (dry_run=%s, %s)", len(counties), DRY_RUN, source)
     started = time.monotonic()
     total_voters = 0
     total_history = 0
+
+    # Combined-CSV path: stream one giant file and route rows by county.
+    if OH_COMBINED_FILE:
+        if not os.path.isfile(os.path.expanduser(OH_COMBINED_FILE)):
+            log.error("OH_COMBINED_FILE does not exist: %s", OH_COMBINED_FILE)
+            return 2
+
+        county_filter: set[str] | None = None
+        if counties_env:
+            county_filter = {c for c in counties}
+            log.info("combined: filtering to %d counties", len(county_filter))
+
+        if DRY_RUN:
+            counts: dict[str, int] = {}
+            for raw in _iter_combined_csv(OH_COMBINED_FILE):
+                county = (_nz(raw.get(COL_COUNTY_NAME)) or "UNKNOWN").upper().replace(" ", "_")
+                if county_filter and county not in county_filter:
+                    continue
+                counts[county] = counts.get(county, 0) + 1
+            for c, n in sorted(counts.items()):
+                log.info("[%s] %d rows (dry run)", c, n)
+            return 0
+
+        client = SupabaseRest(supabase_url, service_key)
+        run_id = str(uuid.uuid4())
+        overall_started_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            total_v, total_h, failed = ingest_combined_file(client, OH_COMBINED_FILE, county_filter, run_id)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("combined ingest failed")
+            log_run(
+                client, run_id=run_id, county=None, status="failed",
+                error=f"combined: {exc}"[:500],
+                started_at=overall_started_iso,
+                ended_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return 1
+
+        try_refresh_materialized_view(client)
+        log_run(
+            client, run_id=run_id, county=None,
+            status="success" if failed == 0 else "failed",
+            rows_upserted=total_v, history_upserted=total_h,
+            error=None if failed == 0 else f"{failed} county failures",
+            started_at=overall_started_iso,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+        )
+        elapsed = time.monotonic() - started
+        log.info("done (combined): %d voters, %d history rows in %.1fs", total_v, total_h, elapsed)
+        return 0
 
     if DRY_RUN:
         for county in counties:
