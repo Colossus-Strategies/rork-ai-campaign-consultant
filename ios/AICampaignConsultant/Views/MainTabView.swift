@@ -178,11 +178,17 @@ struct MainTabView: View {
 
     // MARK: - Custom tab bar (so Chat header stays full-bleed)
 
+    // Voter information is temporarily hidden. The District and Voters tabs
+    // remain wired up in `content` so we can restore them by flipping this flag.
+    private let voterTabsHidden: Bool = true
+
     private var customTabBar: some View {
         HStack {
             tabButton(.home, label: "Home", icon: "house.fill")
-            tabButton(.district, label: "District", icon: "map.fill")
-            tabButton(.voters, label: "Voters", icon: "person.crop.rectangle.stack.fill")
+            if !voterTabsHidden {
+                tabButton(.district, label: "District", icon: "map.fill")
+                tabButton(.voters, label: "Voters", icon: "person.crop.rectangle.stack.fill")
+            }
             tabButton(.chat, label: "Chat", icon: "bubble.left.and.bubble.right.fill")
             tabButton(.services, label: "Services", icon: "briefcase.fill")
             tabButton(.library, label: "Library", icon: "books.vertical.fill")
