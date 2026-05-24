@@ -19,7 +19,7 @@ struct MainTabView: View {
     @State private var showSettings: Bool = false
     @State private var showDeleteConfirm: Bool = false
 
-    enum Tab: Hashable { case home, district, chat, library }
+    enum Tab: Hashable { case home, district, voters, chat, library }
 
     enum HomeRoute: Hashable {
         case module(String)
@@ -66,6 +66,7 @@ struct MainTabView: View {
         switch selection {
         case .home: homeStack
         case .district: districtTab
+        case .voters: votersTab
         case .chat: chatTab
         case .library: libraryTab
         }
@@ -131,6 +132,21 @@ struct MainTabView: View {
     }
 
     @ViewBuilder
+    private var votersTab: some View {
+        if let session = currentSession {
+            MahoningVotersView(session: session)
+        } else {
+            VStack {
+                Spacer()
+                Text("Sign in to view voter stats.")
+                    .font(Theme.sans(13))
+                    .foregroundStyle(Theme.textMuted)
+                Spacer()
+            }
+        }
+    }
+
+    @ViewBuilder
     private var districtTab: some View {
         if let session = currentSession {
             DistrictTabView(profile: profile, session: session, auth: auth)
@@ -161,10 +177,11 @@ struct MainTabView: View {
         HStack {
             tabButton(.home, label: "Home", icon: "house.fill")
             tabButton(.district, label: "District", icon: "map.fill")
+            tabButton(.voters, label: "Voters", icon: "person.crop.rectangle.stack.fill")
             tabButton(.chat, label: "Chat", icon: "bubble.left.and.bubble.right.fill")
             tabButton(.library, label: "Library", icon: "books.vertical.fill")
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 24)
         .background(
