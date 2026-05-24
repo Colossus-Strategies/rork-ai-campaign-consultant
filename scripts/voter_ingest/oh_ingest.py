@@ -866,6 +866,120 @@ def try_refresh_materialized_view(client: SupabaseRest) -> None:
 
 
 def main() -> int:
+    # ==========================================================================
+    # HARD GUARD — absolutely first thing in main().
+    # Prints every relevant env var directly to stderr (bypassing logging
+    # configuration, buffering, .env loaders, etc.) so the user can SEE what
+    # Python actually sees in this process. If OH_SUPABASE_STORAGE_URL (or its
+    # alias OH_COMBINED_URL) is set, we route to the combined-URL path and
+    # RETURN before any per-county SoS code can possibly run.
+    # ==========================================================================
+    def _p(msg: str) -> None:
+        print(f"[oh_ingest] {msg}", file=sys.stderr, flush=True)
+
+    _p("=" * 70)
+    _p("main() entry — environment snapshot")
+    _p("=" * 70)
+    for _k in (
+        "OH_SUPABASE_STORAGE_URL",
+        "OH_COMBINED_URL",
+        "OH_COMBINED_FILE",
+        "OH_LOCAL_DIR",
+        "OH_VOTER_FILE_BASE_URL",
+        "OH_COUNTIES",
+        "SUPABASE_URL",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "DRY_RUN",
+    ):
+        _v = os.environ.get(_k, "")
+        if not _v:
+            _p(f"  {_k} = <UNSET>")
+        elif _k == "SUPABASE_SERVICE_ROLE_KEY":
+            _p(f"  {_k} = <set, {len(_v)} chars>")
+        elif len(_v) > 100:
+            _p(f"  {_k} = {_v[:80]}…{_v[-12:]} ({len(_v)} chars)")
+        else:
+            _p(f"  {_k} = {_v}")
+    _p("=" * 70)
+
+    _storage_url = (
+        os.environ.get("OH_SUPABASE_STORAGE_URL", "").strip()
+        or os.environ.get("OH_COMBINED_URL", "").strip()
+    )
+    if _storage_url:
+        _p("OH_SUPABASE_STORAGE_URL/OH_COMBINED_URL IS SET")
+        _p("==> taking combined-URL path; per-county SoS loop is UNREACHABLE")
+        _p("=" * 70)
+        supabase_url = os.environ.get("SUPABASE_URL")
+        service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        if not supabase_url or not service_key:
+            _p("ERROR: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
+            log.error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
+            return 2
+        counties_env = os.environ.get("OH_COUNTIES")
+        county_filter: set[str] | None = None
+        if counties_env:
+            county_filter = {c.strip().upper() for c in counties_env.split(",") if c.strip()}
+            _p(f"filtering to {len(county_filter)} counties: {sorted(county_filter)}")
+        try:
+            _p(f"downloading combined file from URL…")
+            combined_path = download_combined_url(_storage_url)
+            _p(f"downloaded to {combined_path}")
+        except Exception as exc:  # noqa: BLE001
+            _p(f"ERROR downloading combined URL: {exc}")
+            log.exception("failed to download combined URL")
+            return 1
+
+        if DRY_RUN:
+            counts: dict[str, int] = {}
+            for raw in _iter_combined_csv(combined_path):
+                county = (_nz(raw.get(COL_COUNTY_NAME)) or "UNKNOWN").upper().replace(" ", "_")
+                if county_filter and county not in county_filter:
+                    continue
+                counts[county] = counts.get(county, 0) + 1
+            for c, n in sorted(counts.items()):
+                _p(f"[{c}] {n} rows (dry run)")
+            return 0
+
+        client = SupabaseRest(supabase_url, service_key)
+        run_id = str(uuid.uuid4())
+        overall_started_iso = datetime.now(timezone.utc).isoformat()
+        started = time.monotonic()
+        try:
+            total_v, total_h, failed = ingest_combined_file(
+                client, combined_path, county_filter, run_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            _p(f"ERROR during combined ingest: {exc}")
+            log.exception("combined ingest failed")
+            log_run(
+                client, run_id=run_id, county=None, status="failed",
+                error=f"combined: {exc}"[:500],
+                started_at=overall_started_iso,
+                ended_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return 1
+
+        try_refresh_materialized_view(client)
+        log_run(
+            client, run_id=run_id, county=None,
+            status="success" if failed == 0 else "failed",
+            rows_upserted=total_v, history_upserted=total_h,
+            error=None if failed == 0 else f"{failed} county failures",
+            started_at=overall_started_iso,
+            ended_at=datetime.now(timezone.utc).isoformat(),
+        )
+        elapsed = time.monotonic() - started
+        _p(f"DONE (combined URL): {total_v} voters, {total_h} history rows in {elapsed:.1f}s")
+        log.info("done (combined): %d voters, %d history rows in %.1fs", total_v, total_h, elapsed)
+        return 0
+    else:
+        _p("OH_SUPABASE_STORAGE_URL is NOT set — falling through to other sources")
+        _p("=" * 70)
+    # ==========================================================================
+    # END HARD GUARD
+    # ==========================================================================
+
     supabase_url = os.environ.get("SUPABASE_URL")
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if not supabase_url or not service_key:
