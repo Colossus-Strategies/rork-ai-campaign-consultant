@@ -24,6 +24,13 @@ Environment:
                                script streams the file, groups rows by their
                                COUNTY_ID column, and upserts per-county in
                                batches — no per-county splitting needed.
+  OH_COMBINED_URL              Optional HTTPS URL to download the combined
+                               file from before ingesting. Accepts either a
+                               plain `.csv` or a `.zip` containing one CSV.
+                               Works with Supabase Storage signed URLs and
+                               private buckets (the service-role key is sent
+                               as a bearer token when the URL points at
+                               `/storage/v1/`).
   DRY_RUN                      "1" to skip writes.
 
 Schema reference: ios/AICampaignConsultant/Services/VoterDataSchema.sql
@@ -74,6 +81,10 @@ OH_LOCAL_DIR = os.environ.get("OH_LOCAL_DIR", "").strip()
 # When set, the script reads a single combined CSV containing rows for all
 # counties and routes each row to a per-county upsert buffer.
 OH_COMBINED_FILE = os.environ.get("OH_COMBINED_FILE", "").strip()
+
+# When set, the script downloads the combined file (csv or zip) from this URL
+# and ingests it. Takes precedence over OH_COMBINED_FILE when both are set.
+OH_COMBINED_URL = os.environ.get("OH_COMBINED_URL", "").strip()
 
 OH_ALL_COUNTIES = [
     "ADAMS","ALLEN","ASHLAND","ASHTABULA","ATHENS","AUGLAIZE","BELMONT","BROWN",
@@ -563,13 +574,81 @@ def upsert_county(client: SupabaseRest, county: str, rows: Iterable[tuple[VoterR
 
 
 def _iter_combined_csv(path: str) -> Iterator[dict[str, str]]:
-    """Stream rows from a single combined CSV (all counties in one file)."""
+    """Stream rows from a single combined CSV (all counties in one file).
+
+    Transparently handles both raw `.csv` and `.zip` containing one CSV.
+    """
     expanded = os.path.expanduser(path)
-    log.info("reading combined CSV %s", expanded)
+    log.info("reading combined file %s", expanded)
+    if zipfile.is_zipfile(expanded):
+        with zipfile.ZipFile(expanded) as zf:
+            csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            if not csv_names:
+                raise RuntimeError(f"no CSV inside zip: {expanded}")
+            for name in csv_names:
+                log.info("reading combined CSV entry %s", name)
+                with zf.open(name) as f:
+                    reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8-sig", errors="replace"))
+                    for row in reader:
+                        yield row
+        return
     with open(expanded, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             yield row
+
+
+def download_combined_url(url: str) -> str:
+    """Download the combined file from a URL to a local temp path; return that path.
+
+    Streams to disk so we don't load the (potentially huge) payload into RAM.
+    Sends Supabase auth headers when the URL targets `/storage/v1/`.
+    """
+    import tempfile
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    name = os.path.basename(parsed.path) or "ohio_voters_combined"
+    suffix = ".zip" if name.lower().endswith(".zip") else ".csv"
+    tmp_dir = tempfile.gettempdir()
+    out_path = os.path.join(tmp_dir, f"oh_combined_{int(time.time())}{suffix}")
+
+    headers: dict[str, str] = {}
+    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if service_key and "/storage/v1/" in url:
+        headers["Authorization"] = f"Bearer {service_key}"
+        headers["apikey"] = service_key
+
+    log.info("downloading combined file %s -> %s", url, out_path)
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            with requests.get(url, headers=headers, timeout=600, stream=True) as resp:
+                if resp.status_code == 404:
+                    raise requests.HTTPError(f"404 Not Found for {url}")
+                if resp.status_code >= 500 or resp.status_code == 429:
+                    last_exc = requests.HTTPError(f"{resp.status_code} for {url}")
+                    log.warning("combined download attempt %d -> %s; retrying", attempt + 1, resp.status_code)
+                    time.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+                bytes_written = 0
+                with open(out_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        bytes_written += len(chunk)
+                log.info("downloaded %d bytes to %s", bytes_written, out_path)
+                return out_path
+        except requests.RequestException as exc:
+            last_exc = exc
+            log.warning("combined download attempt %d network error: %s", attempt + 1, exc)
+            time.sleep(2 ** attempt)
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"unable to download combined file from {url}")
 
 
 def ingest_combined_file(
@@ -715,7 +794,9 @@ def main() -> int:
     counties_env = os.environ.get("OH_COUNTIES")
     counties = [c.strip().upper() for c in counties_env.split(",") if c.strip()] if counties_env else OH_ALL_COUNTIES
 
-    if OH_COMBINED_FILE:
+    if OH_COMBINED_URL:
+        source = f"combined_url={OH_COMBINED_URL}"
+    elif OH_COMBINED_FILE:
         source = f"combined={OH_COMBINED_FILE}"
     elif OH_LOCAL_DIR:
         source = f"local={OH_LOCAL_DIR}"
@@ -729,9 +810,19 @@ def main() -> int:
     total_history = 0
 
     # Combined-CSV path: stream one giant file and route rows by county.
-    if OH_COMBINED_FILE:
-        if not os.path.isfile(os.path.expanduser(OH_COMBINED_FILE)):
-            log.error("OH_COMBINED_FILE does not exist: %s", OH_COMBINED_FILE)
+    combined_path = ""
+    if OH_COMBINED_URL:
+        try:
+            combined_path = download_combined_url(OH_COMBINED_URL)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("failed to download OH_COMBINED_URL")
+            return 1
+    elif OH_COMBINED_FILE:
+        combined_path = OH_COMBINED_FILE
+
+    if combined_path:
+        if not os.path.isfile(os.path.expanduser(combined_path)):
+            log.error("combined file does not exist: %s", combined_path)
             return 2
 
         county_filter: set[str] | None = None
@@ -741,7 +832,7 @@ def main() -> int:
 
         if DRY_RUN:
             counts: dict[str, int] = {}
-            for raw in _iter_combined_csv(OH_COMBINED_FILE):
+            for raw in _iter_combined_csv(combined_path):
                 county = (_nz(raw.get(COL_COUNTY_NAME)) or "UNKNOWN").upper().replace(" ", "_")
                 if county_filter and county not in county_filter:
                     continue
@@ -754,7 +845,7 @@ def main() -> int:
         run_id = str(uuid.uuid4())
         overall_started_iso = datetime.now(timezone.utc).isoformat()
         try:
-            total_v, total_h, failed = ingest_combined_file(client, OH_COMBINED_FILE, county_filter, run_id)
+            total_v, total_h, failed = ingest_combined_file(client, combined_path, county_filter, run_id)
         except Exception as exc:  # noqa: BLE001
             log.exception("combined ingest failed")
             log_run(

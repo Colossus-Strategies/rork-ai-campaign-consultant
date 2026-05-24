@@ -46,4 +46,8 @@ jobs:
           # SoS county zips to bypass the OH SoS 403 on GitHub Actions IPs.
           # Expected layout: {base}/{COUNTY}.zip (e.g. ADAMS.zip, ALLEN.zip).
           OH_VOTER_FILE_BASE_URL: ${{ secrets.OH_VOTER_FILE_BASE_URL }}
+          # Optional: download a single combined CSV/zip (all counties) from
+          # this URL instead of fetching per-county. The service-role key is
+          # sent automatically for Supabase Storage URLs.
+          OH_COMBINED_URL: ${{ secrets.OH_COMBINED_URL }}
         run: python scripts/voter_ingest/oh_ingest.py
