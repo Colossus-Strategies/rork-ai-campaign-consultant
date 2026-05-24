@@ -23,6 +23,7 @@ struct DoorListBuilderView: View {
     @State private var listLoading: Bool = false
     @State private var listError: String?
     @State private var didBuild: Bool = false
+    @State private var csvFileURL: URL?
 
     private let maxResults: Int = 500
 
@@ -45,6 +46,15 @@ struct DoorListBuilderView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Close") { dismiss() }
                         .foregroundStyle(Theme.gold)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if let url = csvFileURL, !voters.isEmpty {
+                        ShareLink(item: url) {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(Theme.gold)
+                        }
+                    }
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -337,16 +347,61 @@ struct DoorListBuilderView: View {
         listLoading = true
         listError = nil
         didBuild = true
+        csvFileURL = nil
         do {
             voters = try await MahoningVotersService.doorList(
                 session: session, filter: filter, limit: maxResults
             )
+            csvFileURL = writeCSV(voters: voters)
         } catch {
             voters = []
             listError = (error as? LocalizedError)?.errorDescription
                 ?? "Couldn't build the door list."
         }
         listLoading = false
+    }
+
+    // MARK: - CSV Export
+
+    /// Writes the current voters list to a temp CSV file and returns its URL,
+    /// so it can be vended via `ShareLink` to AirDrop / Files / Mail / Print.
+    private func writeCSV(voters: [DoorListVoter]) -> URL? {
+        guard !voters.isEmpty else { return nil }
+        var csv = "First Name,Last Name,Address,City,Zip,Party\n"
+        for v in voters {
+            let row = [
+                v.first_name ?? "",
+                v.last_name ?? "",
+                v.residential_address ?? "",
+                v.city ?? "",
+                v.zip ?? "",
+                v.partyLetter,
+            ].map(csvEscape).joined(separator: ",")
+            csv.append(row)
+            csv.append("\n")
+        }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let name = "mahoning-door-list-\(stamp).csv"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        do {
+            try csv.data(using: .utf8)?.write(to: url, options: .atomic)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    /// RFC 4180 escaping — wrap fields containing comma, quote, or newline in
+    /// double quotes and double any embedded quote.
+    private func csvEscape(_ field: String) -> String {
+        let needsQuoting = field.contains(",")
+            || field.contains("\"")
+            || field.contains("\n")
+            || field.contains("\r")
+        if !needsQuoting { return field }
+        let escaped = field.replacingOccurrences(of: "\"", with: "\"\"")
+        return "\"\(escaped)\""
     }
 
     // MARK: - Helpers
