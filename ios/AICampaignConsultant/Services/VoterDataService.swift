@@ -133,21 +133,100 @@ enum VoterDataService {
         try await rpcDecode(session: session, name: "get_top_precincts", args: ["metric": metric])
     }
 
+    /// Direct PostgREST query against `public.voters` — bypasses the
+    /// `find_voters` RPC which has been timing out on large unindexed scans.
+    /// No county filter (the table is already Mahoning-only); base filter is
+    /// `voter_status = ACTIVE` unless the caller overrides it. Pagination
+    /// uses the `Range` header so we get the total via `Content-Range` in the
+    /// same round trip.
     static func findVoters(
         session: SupabaseSession,
         filters: VoterFilters,
         page: Int = 0,
         pageSize: Int = 50
     ) async throws -> VoterPage {
-        try await rpcDecode(
-            session: session,
-            name: "find_voters",
-            args: [
-                "filters": filters.toJSON(),
-                "page": page,
-                "page_size": pageSize
-            ]
+        guard SupabaseClient.isConfigured, let base = SupabaseClient.baseURL else {
+            throw VoterDataError.notConfigured
+        }
+
+        // Hard cap to keep the response small and the request fast.
+        let cappedSize = max(1, min(pageSize, 500))
+        let from = page * cappedSize
+        let to = from + cappedSize - 1
+
+        var comps = URLComponents(
+            url: base.appendingPathComponent("/rest/v1/voters"),
+            resolvingAgainstBaseURL: false
         )
+        var items: [URLQueryItem] = [
+            .init(name: "select", value: "sos_voterid,first_name,last_name,party_affiliation,voter_status,precinct_code,residential_address,city,zip,dob"),
+            .init(name: "order", value: "last_name.asc,first_name.asc"),
+        ]
+
+        // Status: default ACTIVE so we never trigger a full-table scan.
+        let status = (filters.status?.isEmpty == false) ? filters.status! : "ACTIVE"
+        items.append(.init(name: "voter_status", value: "eq.\(status)"))
+
+        // Party — D/R direct, U = null OR not in (D,R).
+        if let p = filters.party?.uppercased(), !p.isEmpty {
+            switch p {
+            case "D": items.append(.init(name: "party_affiliation", value: "eq.D"))
+            case "R": items.append(.init(name: "party_affiliation", value: "eq.R"))
+            case "U":
+                items.append(.init(name: "or", value: "(party_affiliation.is.null,and(party_affiliation.neq.D,party_affiliation.neq.R))"))
+            default: break
+            }
+        }
+
+        if let pc = filters.precinct, !pc.isEmpty {
+            items.append(.init(name: "precinct_code", value: "eq.\(pc)"))
+        }
+
+        if let term = filters.search?.trimmingCharacters(in: .whitespaces), !term.isEmpty {
+            // Escape PostgREST `or` reserved chars in the search term.
+            let safe = term.replacingOccurrences(of: ",", with: " ")
+                           .replacingOccurrences(of: "(", with: " ")
+                           .replacingOccurrences(of: ")", with: " ")
+            items.append(.init(name: "or", value: "(first_name.ilike.*\(safe)*,last_name.ilike.*\(safe)*)"))
+        }
+
+        comps?.queryItems = items
+        guard let url = comps?.url else { throw VoterDataError.decoding }
+
+        let bearer = session.isSynthetic ? SupabaseClient.anonKey : session.accessToken
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue(SupabaseClient.anonKey, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        // count=planned is much faster than count=exact on big tables and is
+        // accurate enough for a paginated list footer.
+        req.setValue("count=planned", forHTTPHeaderField: "Prefer")
+        req.setValue("items=\(from)-\(to)", forHTTPHeaderField: "Range")
+        req.timeoutInterval = 30
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw VoterDataError.decoding }
+        if !(200..<300).contains(http.statusCode) && http.statusCode != 206 {
+            throw VoterDataError.http(http.statusCode, nil)
+        }
+
+        // Parse total from Content-Range: "0-49/12345" or "*/12345".
+        var total = 0
+        if let cr = http.value(forHTTPHeaderField: "Content-Range"),
+           let slash = cr.lastIndex(of: "/") {
+            total = Int(cr[cr.index(after: slash)...]) ?? 0
+        }
+
+        let raw: [RawVoter]
+        do {
+            raw = try JSONDecoder().decode([RawVoter].self, from: data)
+        } catch {
+            throw VoterDataError.decoding
+        }
+
+        let rows = raw.map { $0.toVoterRow() }
+        return VoterPage(total: total, page: page, page_size: cappedSize, rows: rows)
     }
 
     static func voterDetail(session: SupabaseSession, voterId: String) async throws -> VoterDetail {
@@ -220,6 +299,54 @@ enum VoterDataService {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw VoterDataError.decoding
+        }
+    }
+
+    // MARK: - Direct query row shape
+
+    /// Mirrors the columns we SELECT from `public.voters` in `findVoters`.
+    /// Converted to `VoterRow` for the UI.
+    nonisolated private struct RawVoter: Decodable {
+        let sos_voterid: String?
+        let first_name: String?
+        let last_name: String?
+        let party_affiliation: String?
+        let voter_status: String?
+        let precinct_code: String?
+        let residential_address: String?
+        let city: String?
+        let zip: String?
+        let dob: String?
+
+        func toVoterRow() -> VoterRow {
+            VoterRow(
+                id: sos_voterid ?? UUID().uuidString,
+                first_name: first_name,
+                last_name: last_name,
+                age: Self.age(fromDOB: dob),
+                party: party_affiliation,
+                status: voter_status,
+                precinct: precinct_code,
+                address: residential_address,
+                city: city,
+                zip: zip,
+                turnout_score: nil
+            )
+        }
+
+        /// Best-effort age from `dob` ("YYYY-MM-DD" or ISO-8601). Returns nil
+        /// on unparseable values rather than throwing — the UI shows "— yrs".
+        private static func age(fromDOB dob: String?) -> Int? {
+            guard let dob, !dob.isEmpty else { return nil }
+            let f = DateFormatter()
+            f.calendar = Calendar(identifier: .gregorian)
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.timeZone = TimeZone(identifier: "UTC")
+            f.dateFormat = "yyyy-MM-dd"
+            let date = f.date(from: String(dob.prefix(10)))
+            guard let date else { return nil }
+            let years = Calendar.current.dateComponents([.year], from: date, to: Date()).year
+            return (years ?? 0) > 0 ? years : nil
         }
     }
 
