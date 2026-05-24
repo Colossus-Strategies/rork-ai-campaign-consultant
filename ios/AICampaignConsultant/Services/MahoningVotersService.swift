@@ -148,12 +148,25 @@ nonisolated enum MahoningVotersService {
     // MARK: - Public
 
     static func overview(session: SupabaseSession) async throws -> MahoningOverview {
-        let s = try await stats(session: session)
-        let t = s.total_active ?? 0
-        let d = s.dem ?? 0
-        let r = s.rep ?? 0
-        let u = s.unaffiliated ?? max(0, t - d - r)
-        return .init(total: t, democrat: d, republican: r, unaffiliated: u)
+        // Try the pre-aggregated RPC first.
+        if let s = try? await stats(session: session) {
+            let t = s.total_active ?? 0
+            let d = s.dem ?? 0
+            let r = s.rep ?? 0
+            let u = s.unaffiliated ?? max(0, t - d - r)
+            // If the RPC returned a degenerate payload (all zeros), fall through
+            // to the direct-count fallback rather than render an empty screen.
+            if t > 0 { return .init(total: t, democrat: d, republican: r, unaffiliated: u) }
+        }
+        // Fallback: planned counts straight off public.voters. Cheap on the
+        // planner and doesn't depend on the RPC existing.
+        async let total = count(session: session, extras: [])
+        async let dem = count(session: session, extras: [("party_affiliation", "eq.D")])
+        async let rep = count(session: session, extras: [("party_affiliation", "eq.R")])
+        let t = try await total
+        let d = try await dem
+        let r = try await rep
+        return .init(total: t, democrat: d, republican: r, unaffiliated: max(0, t - d - r))
     }
 
     /// Total rows in `public.voters` regardless of status (ACTIVE +
@@ -165,25 +178,61 @@ nonisolated enum MahoningVotersService {
     }
 
     static func districtBreakdown(session: SupabaseSession) async throws -> [MahoningDistrictRow] {
-        let s = try await stats(session: session)
-        let rows: [MahoningDistrictRow] = [
-            .init(congressional: "06", house: "59", senate: "33", total: s.cd06_hd59 ?? 0),
-            .init(congressional: "06", house: "58", senate: "33", total: s.cd06_hd58 ?? 0),
-            .init(congressional: "14", house: "58", senate: "33", total: s.cd14_hd58 ?? 0),
-            .init(congressional: "14", house: "59", senate: "33", total: s.cd14_hd59 ?? 0),
-        ]
-        return rows.sorted { $0.total > $1.total }
+        if let s = try? await stats(session: session) {
+            let rows: [MahoningDistrictRow] = [
+                .init(congressional: "06", house: "59", senate: "33", total: s.cd06_hd59 ?? 0),
+                .init(congressional: "06", house: "58", senate: "33", total: s.cd06_hd58 ?? 0),
+                .init(congressional: "14", house: "58", senate: "33", total: s.cd14_hd58 ?? 0),
+                .init(congressional: "14", house: "59", senate: "33", total: s.cd14_hd59 ?? 0),
+            ]
+            if rows.contains(where: { $0.total > 0 }) {
+                return rows.sorted { $0.total > $1.total }
+            }
+        }
+        // Fallback: 4 planned counts in parallel.
+        var results: [MahoningDistrictRow] = []
+        try await withThrowingTaskGroup(of: MahoningDistrictRow.self) { group in
+            for d in districts {
+                group.addTask {
+                    let n = try await count(session: session, extras: [
+                        ("congressional_district", "eq.\(d.cd)"),
+                        ("state_rep_district", "eq.\(d.hd)"),
+                    ])
+                    return MahoningDistrictRow(congressional: d.cd, house: d.hd, senate: d.sd, total: n)
+                }
+            }
+            for try await row in group { results.append(row) }
+        }
+        return results.sorted { $0.total > $1.total }
     }
 
     static func zipBreakdown(session: SupabaseSession, topN: Int = 10) async throws -> [MahoningZipRow] {
-        let s = try await stats(session: session)
-        let rows = (s.top_zips ?? []).compactMap { z -> MahoningZipRow? in
-            guard let zip = z.zip, !zip.isEmpty else { return nil }
-            let t = z.total ?? 0
-            let d = z.dem ?? 0
-            let r = z.rep ?? 0
-            let u = z.unaffiliated ?? max(0, t - d - r)
-            return MahoningZipRow(zip: zip, total: t, democrat: d, republican: r, unaffiliated: u)
+        if let s = try? await stats(session: session) {
+            let rows = (s.top_zips ?? []).compactMap { z -> MahoningZipRow? in
+                guard let zip = z.zip, !zip.isEmpty else { return nil }
+                let t = z.total ?? 0
+                let d = z.dem ?? 0
+                let r = z.rep ?? 0
+                let u = z.unaffiliated ?? max(0, t - d - r)
+                return MahoningZipRow(zip: zip, total: t, democrat: d, republican: r, unaffiliated: u)
+            }
+            if !rows.isEmpty {
+                return Array(rows.sorted { $0.total > $1.total }.prefix(topN))
+            }
+        }
+        // Fallback: planned counts per candidate ZIP, then rank. We only
+        // fetch totals here (not party splits) to keep the request count
+        // bounded; the UI still renders the totals column correctly.
+        var rows: [MahoningZipRow] = []
+        try await withThrowingTaskGroup(of: MahoningZipRow?.self) { group in
+            for zip in candidateZips {
+                group.addTask {
+                    let n = try await count(session: session, extras: [("zip", "eq.\(zip)")])
+                    guard n > 0 else { return nil }
+                    return MahoningZipRow(zip: zip, total: n, democrat: 0, republican: 0, unaffiliated: 0)
+                }
+            }
+            for try await row in group { if let r = row { rows.append(r) } }
         }
         return Array(rows.sorted { $0.total > $1.total }.prefix(topN))
     }
