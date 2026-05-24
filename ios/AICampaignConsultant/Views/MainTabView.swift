@@ -19,7 +19,7 @@ struct MainTabView: View {
     @State private var showSettings: Bool = false
     @State private var showDeleteConfirm: Bool = false
 
-    enum Tab: Hashable { case home, district, voters, chat, library }
+    enum Tab: Hashable { case home, district, voters, chat, services, library }
 
     enum HomeRoute: Hashable {
         case module(String)
@@ -68,6 +68,7 @@ struct MainTabView: View {
         case .district: districtTab
         case .voters: votersTab
         case .chat: chatTab
+        case .services: servicesTab
         case .library: libraryTab
         }
     }
@@ -161,6 +162,10 @@ struct MainTabView: View {
         }
     }
 
+    private var servicesTab: some View {
+        ServicesView(profile: profile)
+    }
+
     private var libraryTab: some View {
         LibraryView(
             profile: profile,
@@ -179,9 +184,10 @@ struct MainTabView: View {
             tabButton(.district, label: "District", icon: "map.fill")
             tabButton(.voters, label: "Voters", icon: "person.crop.rectangle.stack.fill")
             tabButton(.chat, label: "Chat", icon: "bubble.left.and.bubble.right.fill")
+            tabButton(.services, label: "Services", icon: "briefcase.fill")
             tabButton(.library, label: "Library", icon: "books.vertical.fill")
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 6)
         .padding(.top, 8)
         .padding(.bottom, 24)
         .background(
@@ -203,10 +209,12 @@ struct MainTabView: View {
         } label: {
             VStack(spacing: 3) {
                 Image(systemName: icon)
-                    .font(.system(size: 18, weight: .bold))
+                    .font(.system(size: 16, weight: .bold))
                 Text(label)
-                    .font(Theme.sans(10, weight: .bold))
-                    .tracking(0.6)
+                    .font(Theme.sans(9, weight: .bold))
+                    .tracking(0.4)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .foregroundStyle(selection == tab ? Theme.gold : Theme.textMuted)
             .frame(maxWidth: .infinity)
