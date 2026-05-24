@@ -156,6 +156,14 @@ nonisolated enum MahoningVotersService {
         return .init(total: t, democrat: d, republican: r, unaffiliated: u)
     }
 
+    /// Total rows in `public.voters` regardless of status (ACTIVE +
+    /// CONFIRMATION + INACTIVE + anything else). Used as a secondary
+    /// "file size" metric so users can see the whole voter file, not
+    /// just the active subset.
+    static func totalInFile(session: SupabaseSession) async throws -> Int {
+        try await count(session: session, extras: [], includeStatusFilter: false)
+    }
+
     static func districtBreakdown(session: SupabaseSession) async throws -> [MahoningDistrictRow] {
         let s = try await stats(session: session)
         let rows: [MahoningDistrictRow] = [
@@ -305,7 +313,8 @@ nonisolated enum MahoningVotersService {
     /// list size before fetching rows. Scoped to ACTIVE plus any extras.
     private static func count(
         session: SupabaseSession,
-        extras: [(String, String)]
+        extras: [(String, String)],
+        includeStatusFilter: Bool = true
     ) async throws -> Int {
         guard SupabaseClient.isConfigured, let base = SupabaseClient.baseURL else {
             throw VoterDataError.notConfigured
@@ -316,8 +325,10 @@ nonisolated enum MahoningVotersService {
         )
         var items: [URLQueryItem] = [
             .init(name: "select", value: "id"),
-            .init(name: "voter_status", value: "eq.ACTIVE"),
         ]
+        if includeStatusFilter {
+            items.append(.init(name: "voter_status", value: "eq.ACTIVE"))
+        }
         for (k, v) in extras { items.append(.init(name: k, value: v)) }
         comps?.queryItems = items
         guard let url = comps?.url else { throw VoterDataError.decoding }

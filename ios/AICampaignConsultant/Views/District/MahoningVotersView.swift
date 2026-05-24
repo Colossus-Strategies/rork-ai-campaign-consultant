@@ -12,6 +12,7 @@ struct MahoningVotersView: View {
     let session: SupabaseSession
 
     @State private var overview: MahoningOverview?
+    @State private var totalInFile: Int?
     @State private var districts: [MahoningDistrictRow] = []
     @State private var zips: [MahoningZipRow] = []
     @State private var loading: Bool = true
@@ -128,9 +129,12 @@ struct MahoningVotersView: View {
             async let o = MahoningVotersService.overview(session: session)
             async let d = MahoningVotersService.districtBreakdown(session: session)
             async let z = MahoningVotersService.zipBreakdown(session: session, topN: 10)
+            async let t = MahoningVotersService.totalInFile(session: session)
             self.overview = try await o
             self.districts = try await d
             self.zips = try await z
+            // Total-in-file is a nice-to-have; if it fails we still render.
+            self.totalInFile = (try? await t) ?? nil
         } catch {
             self.loadError = (error as? LocalizedError)?.errorDescription
                 ?? "Could not load Mahoning voter data."
@@ -150,6 +154,26 @@ struct MahoningVotersView: View {
                 Text("Mahoning County · status = ACTIVE")
                     .font(Theme.sans(11, weight: .semibold))
                     .foregroundStyle(Theme.textMuted)
+                if let t = totalInFile, t > o.total {
+                    Divider()
+                        .background(Theme.goldFaint.opacity(0.4))
+                        .padding(.vertical, 6)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("TOTAL IN FILE")
+                                .font(Theme.sans(10, weight: .bold))
+                                .tracking(1.5)
+                                .foregroundStyle(Theme.textMuted)
+                            Text("Includes inactive & confirmation")
+                                .font(Theme.sans(10, weight: .semibold))
+                                .foregroundStyle(Theme.textMuted)
+                        }
+                        Spacer()
+                        Text(t.formatted())
+                            .font(Theme.serif(20, weight: .bold))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
             }
         }
     }
