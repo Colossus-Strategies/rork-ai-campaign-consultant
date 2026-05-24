@@ -48,6 +48,8 @@ jobs:
           OH_VOTER_FILE_BASE_URL: ${{ secrets.OH_VOTER_FILE_BASE_URL }}
           # Optional: download a single combined CSV/zip (all counties) from
           # this URL instead of fetching per-county. The service-role key is
-          # sent automatically for Supabase Storage URLs.
+          # sent automatically for Supabase Storage URLs. When either of these
+          # is set, per-county SoS downloads are fully skipped.
           OH_COMBINED_URL: ${{ secrets.OH_COMBINED_URL }}
+          OH_SUPABASE_STORAGE_URL: ${{ secrets.OH_SUPABASE_STORAGE_URL }}
         run: python scripts/voter_ingest/oh_ingest.py

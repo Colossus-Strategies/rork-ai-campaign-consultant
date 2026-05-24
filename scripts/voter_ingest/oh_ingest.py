@@ -31,6 +31,11 @@ Environment:
                                private buckets (the service-role key is sent
                                as a bearer token when the URL points at
                                `/storage/v1/`).
+  OH_SUPABASE_STORAGE_URL      Alias of OH_COMBINED_URL. Use this when pasting
+                               a Supabase Storage signed URL (e.g.
+                               .../storage/v1/object/sign/Voter%20Data/
+                               ohio_voters_combined.csv.zip). If both are set,
+                               OH_SUPABASE_STORAGE_URL wins.
   DRY_RUN                      "1" to skip writes.
 
 Schema reference: ios/AICampaignConsultant/Services/VoterDataSchema.sql
@@ -84,7 +89,12 @@ OH_COMBINED_FILE = os.environ.get("OH_COMBINED_FILE", "").strip()
 
 # When set, the script downloads the combined file (csv or zip) from this URL
 # and ingests it. Takes precedence over OH_COMBINED_FILE when both are set.
-OH_COMBINED_URL = os.environ.get("OH_COMBINED_URL", "").strip()
+# OH_SUPABASE_STORAGE_URL is a user-friendly alias for the same thing and wins
+# when both are populated.
+OH_COMBINED_URL = (
+    os.environ.get("OH_SUPABASE_STORAGE_URL", "").strip()
+    or os.environ.get("OH_COMBINED_URL", "").strip()
+)
 
 OH_ALL_COUNTIES = [
     "ADAMS","ALLEN","ASHLAND","ASHTABULA","ATHENS","AUGLAIZE","BELMONT","BROWN",
@@ -795,6 +805,9 @@ def main() -> int:
     counties = [c.strip().upper() for c in counties_env.split(",") if c.strip()] if counties_env else OH_ALL_COUNTIES
 
     if OH_COMBINED_URL:
+        log.info(
+            "OH_COMBINED_URL/OH_SUPABASE_STORAGE_URL is set — skipping per-county SoS downloads and ingesting the combined file only"
+        )
         source = f"combined_url={OH_COMBINED_URL}"
     elif OH_COMBINED_FILE:
         source = f"combined={OH_COMBINED_FILE}"
