@@ -19,7 +19,7 @@ struct MainTabView: View {
     @State private var showSettings: Bool = false
     @State private var showDeleteConfirm: Bool = false
 
-    enum Tab: Hashable { case home, district, voters, chat, services, library }
+    enum Tab: Hashable { case home, chat, services, library }
 
     enum HomeRoute: Hashable {
         case module(String)
@@ -65,8 +65,6 @@ struct MainTabView: View {
     private var content: some View {
         switch selection {
         case .home: homeStack
-        case .district: districtTab
-        case .voters: votersTab
         case .chat: chatTab
         case .services: servicesTab
         case .library: libraryTab
@@ -132,36 +130,6 @@ struct MainTabView: View {
         .id(chatResetToken)
     }
 
-    @ViewBuilder
-    private var votersTab: some View {
-        if let session = currentSession {
-            MahoningVotersView(session: session)
-        } else {
-            VStack {
-                Spacer()
-                Text("Sign in to view voter stats.")
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.textMuted)
-                Spacer()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var districtTab: some View {
-        if let session = currentSession {
-            DistrictTabView(profile: profile, session: session, auth: auth)
-        } else {
-            VStack {
-                Spacer()
-                Text("Sign in to access voter data.")
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.textMuted)
-                Spacer()
-            }
-        }
-    }
-
     private var servicesTab: some View {
         ServicesView(profile: profile)
     }
@@ -178,17 +146,9 @@ struct MainTabView: View {
 
     // MARK: - Custom tab bar (so Chat header stays full-bleed)
 
-    // Voter information is temporarily hidden. The District and Voters tabs
-    // remain wired up in `content` so we can restore them by flipping this flag.
-    private let voterTabsHidden: Bool = true
-
     private var customTabBar: some View {
         HStack {
             tabButton(.home, label: "Home", icon: "house.fill")
-            if !voterTabsHidden {
-                tabButton(.district, label: "District", icon: "map.fill")
-                tabButton(.voters, label: "Voters", icon: "person.crop.rectangle.stack.fill")
-            }
             tabButton(.chat, label: "Chat", icon: "bubble.left.and.bubble.right.fill")
             tabButton(.services, label: "Services", icon: "briefcase.fill")
             tabButton(.library, label: "Library", icon: "books.vertical.fill")

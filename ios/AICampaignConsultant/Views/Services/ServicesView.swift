@@ -13,6 +13,7 @@ struct ServicesView: View {
 
     @State private var preselected: ServiceKind? = nil
     @State private var showForm: Bool = false
+    @State private var showDistrictForm: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,6 +21,11 @@ struct ServicesView: View {
             Divider().background(Theme.goldFaint).frame(height: 1)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    DistrictIntelligenceCard {
+                        Haptics.tap()
+                        showDistrictForm = true
+                    }
+
                     ServiceCard(
                         eyebrow: "FUNDRAISING",
                         title: "Colossus Fundraising Pro",
@@ -102,6 +108,9 @@ struct ServicesView: View {
         .sheet(isPresented: $showForm) {
             ServiceIntakeFormView(profile: profile, preselected: preselected)
         }
+        .sheet(isPresented: $showDistrictForm) {
+            DistrictDataRequestFormView(profile: profile)
+        }
     }
 
     // MARK: - Header
@@ -144,6 +153,130 @@ struct ServicesView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 4)
+    }
+}
+
+// MARK: - District Intelligence Card
+
+private struct DistrictIntelligenceCard: View {
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack {
+                LinearGradient(
+                    colors: [Color(hex: 0x0a1628), Color(hex: 0x0f1f3d), Color(hex: 0x0a1628)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                USAHeatMapView()
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 14)
+                LinearGradient(
+                    colors: [Color.black.opacity(0.0), Color.black.opacity(0.35)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .allowsHitTesting(false)
+                VStack {
+                    HStack {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(Color(hex: 0x4caf6e))
+                                .frame(width: 6, height: 6)
+                            Text("INCLUDED IN APP")
+                                .font(Theme.sans(9, weight: .bold))
+                                .tracking(1.6)
+                                .foregroundStyle(Color(hex: 0x4caf6e))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(hex: 0x4caf6e).opacity(0.14))
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(Color(hex: 0x4caf6e).opacity(0.4), lineWidth: 0.5))
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(12)
+            }
+            .frame(height: 200)
+            .clipShape(.rect(cornerRadii: .init(topLeading: 16, bottomLeading: 0, bottomTrailing: 0, topTrailing: 16)))
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .center, spacing: 12) {
+                    Image(systemName: "map.fill")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(Theme.bg)
+                        .frame(width: 44, height: 44)
+                        .background(Theme.gold)
+                        .clipShape(.rect(cornerRadius: 12))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("DISTRICT INTELLIGENCE")
+                            .font(Theme.sans(10, weight: .bold))
+                            .tracking(2)
+                            .foregroundStyle(Theme.gold)
+                        Text("Know your district inside out")
+                            .font(Theme.serif(20, weight: .bold))
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                Text("Request a custom data pull for your race — voter file, turnout history, persuasion universes, and precinct-level analytics, delivered by the Colossus team.")
+                    .font(Theme.sans(13, weight: .regular))
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    badge("Voter file")
+                    badge("Turnout")
+                    badge("Walk lists")
+                }
+                HStack(spacing: 8) {
+                    badge("Persuasion")
+                    badge("GOTV")
+                    badge("Custom")
+                }
+
+                Button {
+                    Haptics.tap()
+                    action()
+                } label: {
+                    HStack {
+                        Text("Request District Data")
+                            .font(Theme.sans(13, weight: .bold))
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .foregroundStyle(Theme.bg)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity)
+                    .background(Theme.gold)
+                    .clipShape(.rect(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(.rect(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Theme.goldFaint, lineWidth: 1)
+        )
+    }
+
+    private func badge(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.sans(11, weight: .bold))
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Theme.inputBg)
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(Theme.goldFaint, lineWidth: 0.5))
     }
 }
 
