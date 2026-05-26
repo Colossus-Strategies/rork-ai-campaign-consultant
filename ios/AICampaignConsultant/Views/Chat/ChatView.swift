@@ -21,6 +21,7 @@ struct ChatView: View {
     @State private var input: String = ""
     @State private var isSending: Bool = false
     @State private var showError: Bool = false
+    @State private var errorMessage: String = "Check your network and try again."
     @State private var hasSentFirstMessage: Bool = false
     @State private var onlinePulse: Bool = false
     @State private var saveTarget: ChatMessage? = nil
@@ -57,10 +58,10 @@ struct ChatView: View {
             consumePendingSeed()
         }
         .onChange(of: seedPrompt) { _, _ in consumePendingSeed() }
-        .alert("Connection Error", isPresented: $showError) {
+        .alert("Chat unavailable", isPresented: $showError) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("Check your network and try again.")
+            Text(errorMessage)
         }
         .sheet(item: $saveTarget) { msg in
             SaveToLibrarySheet(
@@ -418,6 +419,46 @@ struct ChatView: View {
         messages.append(.init(role: .assistant, content: welcome))
     }
 
+    private func describe(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
+                return "You're offline. Check your Wi-Fi or cellular connection and try again."
+            case .timedOut:
+                return "The request timed out. Try again in a moment."
+            case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
+                return "Couldn't reach the AI server. Try again shortly."
+            default:
+                return "Network error: \(urlError.localizedDescription)"
+            }
+        }
+        if let aiErr = error as? AIServiceError {
+            switch aiErr {
+            case .missingConfig:
+                return "Chat isn't configured. Please reinstall or update the app."
+            case .http(let code):
+                if code == 401 || code == 403 {
+                    return "Authorization failed (\(code)). Please sign out and sign back in."
+                }
+                if code == 402 {
+                    return "Your AI usage limit was reached (402). Try again later or contact support."
+                }
+                if code == 429 {
+                    return "Rate limit reached (429). Wait a minute and try again."
+                }
+                if code >= 500 {
+                    return "AI server error (\(code)). Please try again shortly."
+                }
+                return "AI request failed with status \(code)."
+            case .decoding:
+                return "Couldn't read the AI response. Please try again."
+            case .empty:
+                return "The AI returned an empty response. Please try again."
+            }
+        }
+        return error.localizedDescription
+    }
+
     private func consumePendingSeed() {
         guard let seed = seedPrompt, !seed.isEmpty else { return }
         // Defer one tick so the welcome message lands first if this is a cold start.
@@ -442,7 +483,7 @@ struct ChatView: View {
 
         if useVoterData, let session = currentSession {
             streamTask = Task {
-                var didFail = false
+                var failure: Error? = nil
                 var answer = ""
                 do {
                     answer = try await AIService.sendWithVoterTools(
@@ -452,10 +493,11 @@ struct ChatView: View {
                     )
                 } catch is CancellationError {
                 } catch {
-                    didFail = true
+                    failure = error
                 }
                 await MainActor.run {
-                    if didFail {
+                    if let failure {
+                        errorMessage = describe(failure)
                         showError = true
                     } else if !answer.isEmpty {
                         let msg = ChatMessage(role: .assistant, content: answer)
@@ -475,7 +517,7 @@ struct ChatView: View {
 
         if useWebSearch || useResearch {
             streamTask = Task {
-                var didFail = false
+                var failure: Error? = nil
                 var answer = ""
                 do {
                     if useResearch {
@@ -498,10 +540,11 @@ struct ChatView: View {
                 } catch is CancellationError {
                     // user-initiated stop
                 } catch {
-                    didFail = true
+                    failure = error
                 }
                 await MainActor.run {
-                    if didFail {
+                    if let failure {
+                        errorMessage = describe(failure)
                         showError = true
                     } else if !answer.isEmpty {
                         let msg = ChatMessage(role: .assistant, content: answer)
@@ -524,7 +567,7 @@ struct ChatView: View {
         streamTask = Task {
             var assistantId: UUID? = nil
             var buffer = ""
-            var didFail = false
+            var failure: Error? = nil
             do {
                 for try await piece in AIService.stream(history: history, systemPrompt: prompt) {
                     try Task.checkCancellation()
@@ -544,15 +587,16 @@ struct ChatView: View {
             } catch is CancellationError {
                 // user-initiated stop — keep partial text
             } catch {
-                didFail = true
+                failure = error
             }
             await MainActor.run {
-                if didFail {
+                if let failure {
                     if let id = assistantId,
                        let idx = messages.firstIndex(where: { $0.id == id }),
                        messages[idx].content.isEmpty {
                         messages.remove(at: idx)
                     }
+                    errorMessage = describe(failure)
                     showError = true
                 } else if let id = assistantId, !buffer.isEmpty {
                     let isCompliance = isComplianceQuestion || ComplianceClassifier.isCompliance(buffer)
