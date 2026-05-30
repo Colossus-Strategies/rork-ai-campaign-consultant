@@ -5,6 +5,11 @@
       "name": "AI Campaign Consultant",
       "path": "ios",
       "framework": "swift"
+    },
+    {
+      "name": "Colossus Web",
+      "path": "web-colossus-web",
+      "framework": "web"
     }
   ]
 }

@@ -1,0 +1,146 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700;9..144,900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Colossus "campaign war room" design system.
+   Deep charcoal / navy backgrounds, burnished gold accents.
+   All colors are HSL. */
+
+@layer base {
+  :root {
+    --background: 216 54% 10%;
+    --foreground: 38 38% 93%;
+
+    --card: 218 59% 15%;
+    --card-foreground: 38 38% 93%;
+
+    --popover: 218 59% 13%;
+    --popover-foreground: 38 38% 93%;
+
+    --primary: 44 53% 54%;
+    --primary-foreground: 216 54% 8%;
+
+    --secondary: 219 49% 18%;
+    --secondary-foreground: 38 38% 93%;
+
+    --muted: 219 40% 20%;
+    --muted-foreground: 217 24% 63%;
+
+    --accent: 44 53% 54%;
+    --accent-foreground: 216 54% 8%;
+
+    --destructive: 5 64% 53%;
+    --destructive-foreground: 38 38% 93%;
+
+    --border: 44 40% 40%;
+    --input: 219 45% 22%;
+    --ring: 44 53% 54%;
+
+    --radius: 0.9rem;
+
+    /* Brand tokens */
+    --gold: 44 53% 54%;
+    --gold-light: 41 65% 66%;
+    --gold-dim: 35 54% 41%;
+    --ink: 216 54% 8%;
+    --surface: 218 59% 15%;
+    --surface-2: 219 49% 18%;
+
+    --sidebar-background: 216 54% 10%;
+    --sidebar-foreground: 38 38% 93%;
+    --sidebar-primary: 44 53% 54%;
+    --sidebar-primary-foreground: 216 54% 8%;
+    --sidebar-accent: 219 49% 18%;
+    --sidebar-accent-foreground: 38 38% 93%;
+    --sidebar-border: 219 40% 22%;
+    --sidebar-ring: 44 53% 54%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(ellipse 80% 60% at 50% -10%, hsl(44 53% 54% / 0.10), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 100% 100%, hsl(35 54% 41% / 0.08), transparent 55%);
+    background-attachment: fixed;
+  }
+
+  h1, h2, h3, h4, .font-serif {
+    font-family: 'Fraunces', Georgia, serif;
+  }
+
+  ::selection {
+    background: hsl(44 53% 54% / 0.3);
+  }
+}
+
+@layer components {
+  .eyebrow {
+    @apply text-xs font-bold uppercase tracking-[0.2em] text-[hsl(var(--gold))];
+  }
+
+  .gold-text {
+    background: linear-gradient(180deg, hsl(var(--gold-light)), hsl(var(--gold)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .glass-card {
+    background: linear-gradient(160deg, hsl(var(--surface) / 0.9), hsl(var(--surface-2) / 0.7));
+    border: 1px solid hsl(var(--gold) / 0.18);
+    backdrop-filter: blur(8px);
+  }
+
+  .gold-glow {
+    box-shadow: 0 8px 30px hsl(var(--gold) / 0.25), 0 0 0 1px hsl(var(--gold) / 0.3) inset;
+  }
+
+  .hairline-top {
+    box-shadow: 0 -1px 0 hsl(var(--gold) / 0.35) inset;
+  }
+}
+
+@layer utilities {
+  .animate-fade-up {
+    animation: fade-up 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(24px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .reveal {
+    opacity: 0;
+    transform: translateY(30px);
+    transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1), transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .reveal.in-view {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .animate-pulse-dot {
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+}
