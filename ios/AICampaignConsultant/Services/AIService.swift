@@ -73,7 +73,7 @@ struct AIService {
         wire.append(contentsOf: history.map { .init(role: $0.role.rawValue, content: $0.content) })
 
         let body = RequestBody(
-            model: "anthropic/claude-sonnet-4",
+            model: "anthropic/claude-sonnet-4.6",
             messages: wire,
             temperature: 0.7,
             max_tokens: 1500
@@ -127,7 +127,7 @@ struct AIService {
                     wire.append(contentsOf: history.map { .init(role: $0.role.rawValue, content: $0.content) })
 
                     let body = StreamRequestBody(
-                        model: "anthropic/claude-sonnet-4",
+                        model: "anthropic/claude-sonnet-4.6",
                         messages: wire,
                         temperature: 0.7,
                         max_tokens: 1500,
@@ -266,7 +266,7 @@ struct AIService {
         }
 
         let body: [String: Any] = [
-            "model": "anthropic/claude-sonnet-4",
+            "model": "anthropic/claude-sonnet-4.6",
             "max_tokens": 2048,
             "system": combinedSystem,
             "tools": [webTool],
@@ -405,7 +405,7 @@ struct AIService {
 
         for _ in 0..<maxTurns {
             let body: [String: Any] = [
-                "model": "anthropic/claude-sonnet-4",
+                "model": "anthropic/claude-sonnet-4.6",
                 "max_tokens": 2048,
                 "system": combinedSystem,
                 "tools": tools,
