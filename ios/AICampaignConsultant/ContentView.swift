@@ -71,7 +71,7 @@ struct ContentView: View {
         case let .awaitingApproval(session, row):
             AwaitingActivationView(auth: auth, session: session, row: row)
         case let .ready(_, _, profile):
-            MainTabView(profile: profile, auth: auth)
+            MainTabView(profile: profile, auth: auth, store: store)
         }
     }
 

@@ -11,6 +11,7 @@ import SwiftUI
 struct MainTabView: View {
     let profile: CandidateProfile
     var auth: AuthViewModel
+    var store: StoreViewModel
 
     @State private var selection: Tab = .home
     @State private var homePath: [HomeRoute] = []
@@ -124,6 +125,7 @@ struct MainTabView: View {
         ChatView(
             profile: profile,
             auth: auth,
+            store: store,
             seedPrompt: pendingChatSeed,
             onSeedConsumed: { pendingChatSeed = nil }
         )

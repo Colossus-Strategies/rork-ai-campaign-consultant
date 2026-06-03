@@ -8,8 +8,12 @@ import SwiftUI
 struct ChatView: View {
     let profile: CandidateProfile
     var auth: AuthViewModel
+    var store: StoreViewModel
     var seedPrompt: String? = nil
     var onSeedConsumed: (() -> Void)? = nil
+
+    /// Identifier used to track this user's daily message tally.
+    private var quotaUserId: String { currentSession?.userId ?? "anonymous" }
 
     private var currentSession: SupabaseSession? {
         if case let .ready(session, _, _) = auth.phase { return session }
@@ -405,6 +409,22 @@ struct ChatView: View {
         send(text: text)
     }
 
+    /// Enforces the per-user daily message cap before any AI request runs.
+    /// Returns true when the user is allowed to send.
+    private func passesQuota() -> Bool {
+        if MessageQuotaService.canSend(userId: quotaUserId, isPremium: store.isPremium) {
+            return true
+        }
+        let limit = MessageQuotaService.dailyLimit(isPremium: store.isPremium)
+        if store.isPremium {
+            errorMessage = "You've reached today's limit of \(limit) messages. Your allowance resets tomorrow."
+        } else {
+            errorMessage = "You've reached today's free limit of \(limit) messages. Upgrade for a higher daily allowance, or come back tomorrow."
+        }
+        showError = true
+        return false
+    }
+
     // MARK: AI
 
     private func seedWelcome() {
@@ -469,6 +489,9 @@ struct ChatView: View {
     }
 
     private func send(text: String) {
+        guard passesQuota() else { return }
+        MessageQuotaService.recordSend(userId: quotaUserId)
+
         let userMsg = ChatMessage(role: .user, content: text)
         messages.append(userMsg)
         hasSentFirstMessage = true
